@@ -8,7 +8,7 @@ libmget/cookie.c
 libmget/css.c
 libmget/css_tokenizer.c
 libmget/decompressor.c
-src/hash.c
+libmget/hashfile.c
 libmget/hashmap.c
 libmget/http.c
 libmget/iri.c
@@ -16,7 +16,7 @@ src/job.c
 libmget/log.c
 src/log.c
 libmget/md5.c
-src/metalink.c
+libmget/metalink.c
 src/mget.c
 libmget/net.c
 src/options.c
