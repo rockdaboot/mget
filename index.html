@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset='utf-8'>
+    <meta http-equiv="X-UA-Compatible" content="chrome=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <link href='https://fonts.googleapis.com/css?family=Architects+Daughter' rel='stylesheet' type='text/css'>
+    <link rel="stylesheet" type="text/css" href="stylesheets/stylesheet.css" media="screen" />
+    <link rel="stylesheet" type="text/css" href="stylesheets/pygment_trac.css" media="screen" />
+    <link rel="stylesheet" type="text/css" href="stylesheets/print.css" media="print" />
+
+    <!--[if lt IE 9]>
+    <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+
+    <title>Mget by rockdaboot</title>
+  </head>
+
+  <body>
+    <header>
+      <div class="inner">
+        <h1>Mget</h1>
+        <h2>Multithreaded metalink/file/website downloader (like Wget) and C library </h2>
+        <a href="https://github.com/rockdaboot/mget" class="button"><small>View project on</small>GitHub</a>
+      </div>
+    </header>
+
+    <div id="content-wrapper">
+      <div class="inner clearfix">
+        <section id="main-content">
+          <h1>
+<a name="mget---multithreaded-metalink--file--website-downloader--spider-and-library" class="anchor" href="#mget---multithreaded-metalink--file--website-downloader--spider-and-library"><span class="octicon octicon-link"></span></a>Mget - multithreaded metalink / file / website downloader / spider and library</h1>
+
+<p>This is a multithreaded Wget-like tool and library written in C.</p>
+
+<p>Designed and written from scratch it requires a C99 and Posix compliant
+development environment.</p>
+
+<p>Included is the stand-alone library libmget which provides an interface
+to many useful functions used by Mget.</p>
+
+<p>The originally purpose was to help out on Wget2 development (refactoring,
+modern and clean code, new technology, new design).</p>
+
+<p>In many cases Mget downloads much faster than Wget1.14 due to HTTP zlib
+compression, parallel connections and use of If-Modified-Since HTTP header.</p>
+
+<p>It consumes less system and user CPU cycles due to larger buffers and
+buffer recycling.</p>
+
+<h2>
+<a name="license" class="anchor" href="#license"><span class="octicon octicon-link"></span></a>License</h2>
+
+<p>Mget is licensed under GPLv3+.<br>
+Libmget is licensed under LGPLv3+.</p>
+
+<h2>
+<a name="mailing-list" class="anchor" href="#mailing-list"><span class="octicon octicon-link"></span></a>Mailing List</h2>
+
+<p>To join the mailing list send an email to</p>
+
+<p><a href="mailto:mget-bugs+subscribe@googlegroups.com">mget-bugs+subscribe@googlegroups.com</a></p>
+
+<p>and follow the instructions provided by the answer mail.</p>
+
+<h2>
+<a name="development-status" class="anchor" href="#development-status"><span class="octicon octicon-link"></span></a>Development Status</h2>
+
+<p>Mget has already many features that go beyond what Wget provides.<br></p>
+
+<p>An incomplete list of implemented features:</p>
+
+<ul>
+<li>Support for bzip2 Content-Encoding / Accept-Encoding compression type</li>
+<li>New Year gimmick: added support for XZ Content-Encoding / Accept-Encoding compression type</li>
+<li>Character encoding of input files may be specified despite from local and remote encoding (--input-encoding)</li>
+<li>Support scanning RSS 2.0 feeds from local files (--force-rss -i )</li>
+<li>Support scanning RSS 2.0 feeds.</li>
+<li>Support scanning Atom 1.0 feeds from local files (--force-atom -i )</li>
+<li>Support scanning Atom 1.0 feeds.</li>
+<li>Support scanning URLs from local Sitemap XML file (--force-sitemap -i )</li>
+<li>Support scanning sitemap files given in robots.txt (Sitemap XML, gzipped Sitemap XML, plain text) including
+sitemap index files.</li>
+<li>Support arbitrary number of proxies for parallel downloads</li>
+<li>Multithreaded download of single files (option --chunk-size)</li>
+<li>Internationalized Domain Names in Applications (compile-selectable IDNA2008 or IDNA2003)</li>
+<li>ICEcast / SHOUTcast support via library (see examples/getstream.c)</li>
+<li>respect /robots.txt "Robot Exclusion Standard" and <code>&lt;META name="robots" ...&gt;</code>
+</li>
+<li>new option --secure-protocol=PFS to have TLS only plus forcing Perfect Forward Secrecy (PFS)</li>
+<li>use TCP Fast Open if available</li>
+<li>IDN support for international domains</li>
+<li>autotools support</li>
+<li>proxy support</li>
+<li>cookies (session/non-session), detection of supercookies via Mozilla Public Suffix List
+(use the new option --cookie-suffixes , better: put it into ~/.mgetrc)</li>
+<li>respect cookie public suffix list (<a href="http://publicsuffix.org/list/">http://publicsuffix.org/list/</a>)</li>
+<li>recursive download of websites with or without spanning hosts</li>
+<li>download of single web pages / resources</li>
+<li>zlib/gzip compressed HTTP/HTTPS downloads (gzip, deflate)</li>
+<li>number of parallel download threads is adjustable</li>
+<li>include directive for config files (wildcards allowed)</li>
+<li>support for keep-alive connections</li>
+<li>included CSS, HTML, XML parser needed for recursive downloads</li>
+<li>gettext support</li>
+<li>HTTPS via libgnutls</li>
+<li>support for Metalink RFC 6249 (Metalink/HTTP: Mirrors and Hashes)</li>
+<li>support for Metalink RFC 5854 (Metalink Download Description Format / .meta4 files)</li>
+<li>support for Metalink 3</li>
+<li>Metalink checksumming via libgnutls</li>
+<li>DNS lookup cache</li>
+<li>IPv4 and IPv6 support</li>
+<li>tested on Debian SID amd64 and OpenBSD 5.0</li>
+<li>compiled and tested with gcc (4.7.1 upto 4.8.2) and clang (3.1.1 upto 3.4)</li>
+<li>tested regularly with static analysis tools</li>
+<li>compiled and linked with hardening options proposed by the Debian project</li>
+</ul><p>Anybody should feel free to contribute ideas, opinions, knowledge, code, tests, etc.</p>
+
+<h2>
+<a name="not-yet-implemented" class="anchor" href="#not-yet-implemented"><span class="octicon octicon-link"></span></a>Not yet implemented</h2>
+
+<p>The following is just a quick list of ideas and todos.<br>
+The mid-range goal is to come as close to Wget, that Wget's units test work for Mget.</p>
+
+<p>Some ideas of what could be done next (but contact me before you start bigger changes!):</p>
+
+<ul>
+<li>use <a href="http://developer.gnome.org/gtk-doc-manual/unstable/settingup.html.en">gtk-doc-tools</a> for documentation.<br>
+I want the docs stay with the code: already tested Doxygen, but the man page support seems broken/orphaned.</li>
+<li>http authentication (basic &amp; digest RFC 2617) [done and working, but some optimizing needed]</li>
+<li>WARC support</li>
+<li>RFC 6797 HSTS (HTTP Strict Transport Security)
+<a href="https://src.chromium.org/viewvc/chrome/trunk/src/net/base/transport_security_state_static.json">Chromium HSTS domain list</a>
+</li>
+<li>read credentials from secure wallets (e.g. kwallet, firefox, <a href="http://sourceforge.net/projects/passwordsafe/">http://sourceforge.net/projects/passwordsafe/</a>)</li>
+<li>HTTP request pipelining</li>
+<li>SPDY / HTTP2.0 protocol</li>
+<li>respect data-urls</li>
+<li>Streaming (.m3u, etc. formats)</li>
+<li>ftp support</li>
+<li>https with openssl</li>
+<li>a progress display</li>
+<li>Documentation docbook with free Serna WYSIWYG/WYMIWYG editor (conversion to texinfo possible)
+and/or with doxygen (API docs embedded into source code)</li>
+<li>plugin technology to plug in user-specific code</li>
+</ul><h2>
+<a name="requirements" class="anchor" href="#requirements"><span class="octicon octicon-link"></span></a>Requirements</h2>
+
+<p>The following packages are needed to build Mget:</p>
+
+<ul>
+<li>autotools (autoconf, autogen, automake, autopoint, libtool)</li>
+<li>gtk-doc-tools (when creating the HTML documentation)</li>
+<li>xsltproc (when creating man pages)</li>
+<li>gettext &gt;= 0.18.1</li>
+<li>libz &gt;= 1.2.3 (the distribution may call the package zlib*, eg. zlib1g on Debian)</li>
+<li>liblzma &gt;= 5.1.1alpha (optional, if you need LZMA decompression)</li>
+<li>libbz2 &gt;= 1.0.6 (optional, if you need BZIP2 decompression)</li>
+<li>libgnutls &gt;= 2.4.2</li>
+<li>libidn2 &gt;= 0.9 + libunistring &gt;= 0.9.3 (libidn &gt;= 1.25 if you don't have libidn2)</li>
+<li>flex &gt;= 2.5.35</li>
+</ul><p>The versions are recommended, but older versions are supposed to work.</p>
+
+<h2>
+<a name="building-from-git" class="anchor" href="#building-from-git"><span class="octicon octicon-link"></span></a>Building from git</h2>
+
+<p>Download project and prepare sources with</p>
+
+<pre><code>    git clone http://github.com/rockdaboot/mget
+    ./autogen.sh
+</code></pre>
+
+<p>Build Mget with</p>
+
+<pre><code>    ./configure
+    make
+</code></pre>
+
+<p>Test the functionality (sorry, right now under heavy development)</p>
+
+<pre><code>    make check
+</code></pre>
+
+<p>Install Mget and libmget</p>
+
+<pre><code>    sudo make install (or su -c "make install")
+</code></pre>
+
+<p>To create Mget HTML documentation</p>
+
+<pre><code>    ./configure --enable-gtk-doc
+    make
+</code></pre>
+
+<p>To create Mget HTML documentation and man pages (not functional right now)</p>
+
+<pre><code>    ./configure --enable-gtk-doc --enable-man
+    make
+</code></pre>
+
+<h2>
+<a name="documentation" class="anchor" href="#documentation"><span class="octicon octicon-link"></span></a>Documentation</h2>
+
+<p>There is no own documentation yet, but Mget aims to be Wget1.14 compatible.</p>
+
+<pre><code>    mget --help
+</code></pre>
+
+<p>prints the usage and the current set of integrated options.
+For more info, see the man pages of Wget.</p>
+
+<p>My idea is to use the free Serna WYSIWYG/WYMIWYG editor for documentation.
+It creates docbook format which can be converted into texinfo format.
+And it opens the documentation process to almost any volunteers without
+texinfo knowledge.</p>
+        </section>
+
+        <aside id="sidebar">
+          <a href="https://github.com/rockdaboot/mget/zipball/master" class="button">
+            <small>Download</small>
+            .zip file
+          </a>
+          <a href="https://github.com/rockdaboot/mget/tarball/master" class="button">
+            <small>Download</small>
+            .tar.gz file
+          </a>
+
+          <p class="repo-owner"><a href="https://github.com/rockdaboot/mget"></a> is maintained by <a href="https://github.com/rockdaboot">rockdaboot</a>.</p>
+
+          <p>This page was generated by <a href="https://pages.github.com">GitHub Pages</a> using the Architect theme by <a href="https://twitter.com/jasonlong">Jason Long</a>.</p>
+        </aside>
+      </div>
+    </div>
+
+  
+  </body>
+</html>
