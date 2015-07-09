@@ -1,15 +1,5 @@
-language: c
-os:
-  - linux
-  - osx
-compiler:
-  - gcc
-  - clang
-matrix:
-  allow_failures:
-    - os: osx
+language: objective-c
 # Change this to your needs
-script: ./autogen.sh && ./configure --enable-gtk-doc && make -j4 && make check -j4 && make distcheck 
+script: ./.travis.sh run_tests
 before_install:
-  - echo $TRAVIS_OS_NAME
-  - ./.travis.sh
+  - ./.travis.sh prepare
