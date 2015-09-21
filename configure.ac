@@ -100,7 +100,7 @@ fi
 #
 m4_ifdef([AM_GNU_GETTEXT], [
   AM_GNU_GETTEXT([external],[need-ngettext])
-  po_makefile_in=po/Makefile.in
+  AC_CONFIG_FILES([po/Makefile.in])
   AM_CONDITIONAL([HAVE_PO], [true])
 ], [
   AM_CONDITIONAL([HAVE_PO], [false])
@@ -125,8 +125,7 @@ AM_CONDITIONAL([GTK_DOC_USE_LIBTOOL], false)
 ])
 
 if test x"$have_gtk_doc" = xyes -a x"$enable_gtk_doc" = xyes; then
-  docdir_makefile=docs/libmget/Makefile
-  docdir_version_xml=docs/libmget/version.xml
+  AC_CONFIG_FILES([docs/libmget/Makefile docs/libmget/version.xml])
   AC_SUBST([LIBMGET_DOCS], [docs/libmget])
 fi
 
@@ -397,9 +396,6 @@ AC_CONFIG_FILES([Makefile
                  include/Makefile
                  libmget/Makefile
                  src/Makefile
-                 ${po_makefile_in}
-                 ${docdir_makefile}
-                 ${docdir_version_xml}
                  data/Makefile
                  examples/Makefile
                  tests/Makefile
