@@ -1379,7 +1379,7 @@ ssize_t mget_ssl_read_timeout(void *session, char *buf, size_t count, int timeou
 		if (nbytes == GNUTLS_E_REHANDSHAKE) {
 			debug_printf("*** REHANDSHAKE while reading\n");
 			if ((nbytes = _do_handshake(session, (int)(ptrdiff_t)gnutls_transport_get_ptr(session), timeout)) == 0)
-				continue; /* restart reading */
+				continue; // restart reading
 		}
 
 		return -1;
@@ -1399,7 +1399,7 @@ ssize_t mget_ssl_read_timeout(void *session, char *buf, size_t count, int timeou
 		if (nbytes == GNUTLS_E_REHANDSHAKE) {
 			debug_printf("*** REHANDSHAKE while reading\n");
 			if ((nbytes = _do_handshake(session, (int)(ptrdiff_t)gnutls_transport_get_ptr(session), timeout)) == 0)
-				nbytes = GNUTLS_E_AGAIN; /* restart reading */
+				nbytes = GNUTLS_E_AGAIN; // restart reading
 		}
 		if (nbytes >= 0 || nbytes != GNUTLS_E_AGAIN)
 			break;
