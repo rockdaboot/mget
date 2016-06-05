@@ -9,7 +9,7 @@ MGET_TESTS = test test-mget-1 test-restrict-ascii test-i-http test-i-https test-
  test-meta-robots test-idn-robots test-idn-meta test-idn-cmd \
  test-iri test-iri-percent test-iri-list test-iri-forced-remote \
  test-auth-basic test-parse-html test-parse-rss test--page-requisites test--accept \
- test-k test--follow-tags test-directory-clash
+ test-k test--follow-tags test-directory-clash test-ftp test-ftps
 
 #test--post-file test-E-k
 
@@ -29,6 +29,9 @@ dist-hook:
 	rm -f $(distdir)/files/elb_bibel.txt
 #	cp $(top_srcdir)/data/public_suffixes.txt $(distdir)/files/
 #	rm -rf `find $(distdir)/files -name CVS`
+
+clean-local:
+	rm -rf $(srcdir)/.test_*
 
 #AM_TESTS_ENVIRONMENT = VALGRIND_TESTS"=@VALGRIND_ENVIRONMENT@"
 AM_TESTS_ENVIRONMENT = export VALGRIND_TESTS"=@VALGRIND_TESTS@";

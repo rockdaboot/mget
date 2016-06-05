@@ -123,14 +123,14 @@ int main(void)
 	char request_header[256];
 
 	// functions won't come back if an error occurs
-	mget_test_start_http_server(
+	mget_test_start_server(
 		MGET_TEST_RESPONSE_URLS, &urls, countof(urls),
 		0);
 
 	// test-iri
 	snprintf(request_header, sizeof(request_header),
 		"Referer: http://localhost:%d/p2_%%C3%%A9%%C3%%A9n.html",
-		mget_test_get_server_port());
+		mget_test_get_http_server_port());
 	urls[4].request_headers[0] = urls[7].request_headers[0] = request_header;
 
 	mget_test(

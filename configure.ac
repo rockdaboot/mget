@@ -100,7 +100,7 @@ fi
 #
 m4_ifdef([AM_GNU_GETTEXT], [
   AM_GNU_GETTEXT([external],[need-ngettext])
-  po_makefile_in=po/Makefile.in
+  AC_CONFIG_FILES([po/Makefile.in])
   AM_CONDITIONAL([HAVE_PO], [true])
 ], [
   AM_CONDITIONAL([HAVE_PO], [false])
@@ -125,8 +125,7 @@ AM_CONDITIONAL([GTK_DOC_USE_LIBTOOL], false)
 ])
 
 if test x"$have_gtk_doc" = xyes -a x"$enable_gtk_doc" = xyes; then
-  docdir_makefile=docs/libmget/Makefile
-  docdir_version_xml=docs/libmget/version.xml
+  AC_CONFIG_FILES([docs/libmget/Makefile docs/libmget/version.xml])
   AC_SUBST([LIBMGET_DOCS], [docs/libmget])
 fi
 
@@ -357,22 +356,46 @@ AC_FUNC_ALLOCA
 AC_FUNC_FORK
 #AC_FUNC_MALLOC
 AC_FUNC_MMAP
-AC_FUNC_REALLOC
+#AC_FUNC_REALLOC
 AC_FUNC_FNMATCH
 AC_CHECK_FUNCS([\
  clock_gettime dprintf dup2 futimens gettimeofday localtime_r memchr\
  memmove memset mkdir munmap select setlocale socket strcasecmp\
  strchr strdup strerror strncasecmp strndup strrchr strstr strlcpy \
- vasprintf nanosleep usleep iconv nl_langinfo futimens glob pwrite \
+ vasprintf nanosleep usleep nl_langinfo futimens glob pwrite \
  qsort_r])
+
+# BSD / OSX have a qsort_r with swapped arguments
+if test x$ac_cv_func_qsort_r = xyes ; then
+  AC_MSG_CHECKING([argument style of qsort_r])
+  AC_RUN_IFELSE([AC_LANG_SOURCE([[
+  #define _GNU_SOURCE
+  #include <stdlib.h>
+
+  static int cmp(const void *a, const void *b, void *c)
+  {
+    return *(const int *)a - *(const int *)b;
+  }
+  int main(void)
+  {
+    int arr[3] = { 1, 2, 0 };
+
+    qsort_r(arr, 3, sizeof(int), cmp, NULL);
+
+    return !(arr[0] == 0 && arr[1] == 1 && arr[2] == 2);
+  }]])],
+  [
+    AC_MSG_RESULT([GNU])
+  ],[
+    AC_DEFINE(HAVE_QSORT_R_BSD, 1, [Define to 1 if you have the 'qsort_r' function with BSD style arguments])
+    AC_MSG_RESULT([BSD])
+  ])
+fi
 
 AC_CONFIG_FILES([Makefile
                  include/Makefile
                  libmget/Makefile
                  src/Makefile
-                 ${po_makefile_in}
-                 ${docdir_makefile}
-                 ${docdir_version_xml}
                  data/Makefile
                  examples/Makefile
                  tests/Makefile

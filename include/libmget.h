@@ -31,6 +31,7 @@
 #ifdef HAVE_LIBPTHREAD
 #	include <pthread.h>
 #endif
+#include <sys/types.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -38,6 +39,9 @@
 #include <time.h>
 #ifdef HAVE_INTTYPES_H
 #	include <inttypes.h>
+#endif
+#ifdef WITH_LIBNGHTTP2
+	#include <nghttp2/nghttp2.h>
 #endif
 
 // transitional defines, remove when migration to libmget is done
@@ -260,6 +264,8 @@ int
 int
 	mget_ready_2_write(int fd, int timeout);
 int
+	mget_ready_2_transfer(int fd, int timeout, short mode);
+int
 	mget_strcmp(const char *s1, const char *s2) G_GNUC_MGET_PURE;
 int
 	mget_strcasecmp(const char *s1, const char *s2) G_GNUC_MGET_PURE;
@@ -311,6 +317,8 @@ char *
 	mget_charset_transcode(const char *src, const char *src_encoding, const char *dst_encoding) G_GNUC_MGET_MALLOC;
 int
 	mget_str_needs_encoding(const char *s) G_GNUC_MGET_NONNULL((1)) G_GNUC_MGET_PURE;
+int
+	mget_str_is_valid_utf8(const char *utf8) G_GNUC_MGET_NONNULL((1)) G_GNUC_MGET_PURE;
 char *
 	mget_str_to_utf8(const char *src, const char *encoding) G_GNUC_MGET_MALLOC;
 char *
@@ -395,6 +403,10 @@ void *
 	mget_memdup(const void *s, size_t n) G_GNUC_MGET_ALLOC_SIZE(2);
 char *
 	mget_strdup(const char *s) G_GNUC_MGET_MALLOC;
+char *
+	mget_strmemdup(const void *s, size_t n) G_GNUC_MGET_ALLOC_SIZE(2);
+void
+	mget_strmemcpy(char *s, size_t ssize, const void *m, size_t n) G_GNUC_MGET_NONNULL_ALL;
 
 /*
  * Base64 routines
@@ -1119,6 +1131,9 @@ void
 #define MGET_NET_FAMILY_IPV4 1
 #define MGET_NET_FAMILY_IPV6 2
 
+#define MGET_PROTOCOL_HTTP_1_1  0
+#define MGET_PROTOCOL_HTTP_2_0  1
+
 typedef struct mget_tcp_st mget_tcp_t;
 
 mget_tcp_t *
@@ -1131,6 +1146,8 @@ void
 	mget_tcp_close(mget_tcp_t *tcp);
 void
 	mget_tcp_set_timeout(mget_tcp_t *tcp, int timeout);
+int
+	mget_tcp_get_timeout(mget_tcp_t *tcp) G_GNUC_MGET_PURE;
 void
 	mget_tcp_set_connect_timeout(mget_tcp_t *tcp, int timeout);
 void
@@ -1158,6 +1175,8 @@ int
 int
 	mget_tcp_get_preferred_family(mget_tcp_t *tcp) G_GNUC_MGET_PURE;
 int
+	mget_tcp_get_protocol(mget_tcp_t *tcp);
+int
 	mget_tcp_get_local_port(mget_tcp_t *tcp);
 void
 	mget_tcp_set_debug(mget_tcp_t *tcp, int debug);
@@ -1165,6 +1184,8 @@ void
 	mget_tcp_set_family(mget_tcp_t *tcp, int family);
 void
 	mget_tcp_set_preferred_family(mget_tcp_t *tcp, int family);
+void
+	mget_tcp_set_protocol(mget_tcp_t *tcp, int protocol);
 void
 	mget_tcp_set_bind_address(mget_tcp_t *tcp, const char *bind_address);
 struct addrinfo *
@@ -1174,7 +1195,11 @@ int
 int
 	mget_tcp_listen(mget_tcp_t *tcp, const char *host, const char *port, int backlog) G_GNUC_MGET_NONNULL((1));
 mget_tcp_t
-	*mget_tcp_accept(mget_tcp_t *parent_tcp)G_GNUC_MGET_NONNULL((1));
+	*mget_tcp_accept(mget_tcp_t *parent_tcp) G_GNUC_MGET_NONNULL((1));
+int
+	mget_tcp_tls_start(mget_tcp_t *tcp) G_GNUC_MGET_NONNULL((1));
+void
+	mget_tcp_tls_stop(mget_tcp_t *tcp) G_GNUC_MGET_NONNULL((1));
 ssize_t
 	mget_tcp_vprintf(mget_tcp_t *tcp, const char *fmt, va_list args) G_GNUC_MGET_PRINTF_FORMAT(2,0) G_GNUC_MGET_NONNULL_ALL;
 ssize_t
@@ -1183,6 +1208,8 @@ ssize_t
 	mget_tcp_write(mget_tcp_t *tcp, const char *buf, size_t count) G_GNUC_MGET_NONNULL_ALL;
 ssize_t
 	mget_tcp_read(mget_tcp_t *tcp, char *buf, size_t count) G_GNUC_MGET_NONNULL_ALL;
+int
+	mget_tcp_ready_2_transfer(mget_tcp_t *tcp, int flags) G_GNUC_MGET_NONNULL_ALL;
 
 /*
  * SSL routines
@@ -1231,8 +1258,8 @@ void
 	mget_ssl_server_init(void);
 void
 	mget_ssl_server_deinit(void);
-void *
-	mget_ssl_server_open(int sockfd, int connect_timeout);
+int
+	mget_ssl_server_open(mget_tcp_t *tcp);
 void
 	mget_ssl_server_close(void **session);
 
@@ -1287,13 +1314,17 @@ enum {
 // keep the request as simple as possible
 typedef struct {
 	mget_vector_t *
-		lines;
+		headers;
 	const char *
 		scheme;
+	void *
+		nghttp2_context; // needed for nghttp2 callbacks
 	mget_buffer_t
 		esc_resource; // URI escaped resource
 	mget_buffer_t
 		esc_host; // URI escaped host
+	int32_t
+		stream_id; // HTTP2 stream id
 	char
 		esc_resource_buf[256];
 	char
@@ -1369,6 +1400,12 @@ typedef struct {
 		scheme;
 	mget_buffer_t *
 		buf;
+#ifdef WITH_LIBNGHTTP2
+	nghttp2_session *
+		http2_session;
+#endif
+	char
+		protocol; // MGET_PROTOCOL_HTTP_1_1 or MGET_PROTOCOL_HTTP_2_0
 	unsigned
 		print_response_headers : 1;
 } mget_http_connection_t;
@@ -1413,7 +1450,7 @@ const char *
 const char *
 	mget_http_parse_connection(const char *s, char *keep_alive) G_GNUC_MGET_NONNULL_ALL;
 const char *
-	mget_http_parse_setcookie(const char *s, mget_cookie_t *cookie) G_GNUC_MGET_NONNULL_ALL;
+	mget_http_parse_setcookie(const char *s, mget_cookie_t *cookie) G_GNUC_MGET_NONNULL((1));
 const char *
 	mget_http_parse_etag(const char *s, const char **etag) G_GNUC_MGET_NONNULL((1));
 
@@ -1423,13 +1460,13 @@ char *
 void
 	mget_http_add_param(mget_vector_t **params, mget_http_header_param_t *param) G_GNUC_MGET_NONNULL_ALL;
 void
-	mget_http_add_header_vprintf(mget_http_request_t *req, const char *fmt, va_list args) G_GNUC_MGET_PRINTF_FORMAT(2,0) G_GNUC_MGET_NONNULL_ALL;
+	mget_http_add_header_vprintf(mget_http_request_t *req, const char *name, const char *fmt, va_list args) G_GNUC_MGET_PRINTF_FORMAT(3,0) G_GNUC_MGET_NONNULL_ALL;
 void
-	mget_http_add_header_printf(mget_http_request_t *req, const char *fmt, ...) G_GNUC_MGET_PRINTF_FORMAT(2,3) G_GNUC_MGET_NONNULL_ALL;
-void
-	mget_http_add_header_line(mget_http_request_t *req, const char *line) G_GNUC_MGET_NONNULL_ALL;
+	mget_http_add_header_printf(mget_http_request_t *req, const char *name, const char *fmt, ...) G_GNUC_MGET_PRINTF_FORMAT(3,4) G_GNUC_MGET_NONNULL_ALL;
 void
 	mget_http_add_header(mget_http_request_t *req, const char *name, const char *value) G_GNUC_MGET_NONNULL_ALL;
+void
+	mget_http_add_header_param(mget_http_request_t *req, mget_http_header_param_t *param) G_GNUC_MGET_NONNULL_ALL;
 void
 	mget_http_add_credentials(mget_http_request_t *req, mget_http_challenge_t *challenge, const char *username, const char *password) G_GNUC_MGET_NONNULL((1));
 void

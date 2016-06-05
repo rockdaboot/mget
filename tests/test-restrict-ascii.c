@@ -58,7 +58,7 @@ int main(void)
 	};
 
 	// functions won't come back if an error occurs
-	mget_test_start_http_server(
+	mget_test_start_server(
 		MGET_TEST_RESPONSE_URLS, &urls, countof(urls),
 		0);
 
@@ -76,7 +76,7 @@ int main(void)
 	// test-restrict-ascii
 /*
 	mget_test(
-		MGET_TEST_KEEP_TMPFILES, 1,
+		// MGET_TEST_KEEP_TMPFILES, 1,
 		MGET_TEST_OPTIONS, "--local-encoding=utf-8",
 		MGET_TEST_REQUEST_URL, urls[0].name + 1,
 		MGET_TEST_EXPECTED_ERROR_CODE, 0,

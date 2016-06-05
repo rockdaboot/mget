@@ -441,11 +441,11 @@ static int send_ocsp_request(const char *server,
 	_generate_ocsp_data(cert, issuer, &body, nonce);
 
 	req = mget_http_create_request(iri, "POST");
-	mget_http_add_header_line(req, "Accept-Encoding: identity\r\n");
-	mget_http_add_header_line(req, "Accept: */*\r\n");
-	mget_http_add_header_line(req, "Content-Type: application/ocsp-request\r\n");
-	mget_http_add_header_printf(req, "Content-Length: %u", body.size);
-	mget_http_add_header_line(req, "Connection: close\r\n");
+	mget_http_add_header(req, "Accept-Encoding", "identity");
+	mget_http_add_header(req, "Accept", "*/*");
+	mget_http_add_header(req, "Content-Type", "application/ocsp-request");
+	mget_http_add_header_printf(req, "Content-Length", "%u", body.size);
+	mget_http_add_header(req, "Connection", "close");
 
 	mget_http_connection_t *conn;
 	if ((rc = mget_http_open(&conn, iri)) == MGET_E_SUCCESS) {
@@ -1068,7 +1068,48 @@ void mget_ssl_deinit(void)
 	mget_thread_mutex_unlock(&_mutex);
 }
 
-//void *mget_ssl_open(int sockfd, const char *hostname, int connect_timeout)
+static int _do_handshake(gnutls_session_t session, int sockfd, int timeout)
+{
+	int ret;
+
+	// Wait for socket being ready before we call gnutls_handshake().
+	// I had problems on a KVM Win7 + CygWin (gnutls 3.2.4-1).
+	int rc = mget_ready_2_write(sockfd, timeout);
+
+	if (rc == 0)
+		ret = MGET_E_TIMEOUT;
+	else
+		ret = MGET_E_HANDSHAKE;
+
+	// Perform the TLS handshake
+	while (rc > 0) {
+		rc = gnutls_handshake(session);
+		if (rc == 0 || gnutls_error_is_fatal(rc)) {
+			if (rc == 0) {
+				ret = MGET_E_SUCCESS;
+			} else {
+				error_printf("GnuTLS: (%d) %s\n", rc, gnutls_strerror(rc));
+
+				if (rc == GNUTLS_E_CERTIFICATE_ERROR)
+					ret = MGET_E_CERTIFICATE;
+				else
+					ret = MGET_E_HANDSHAKE;
+			}
+			break;
+		}
+
+		if (gnutls_record_get_direction(session)) {
+			// wait for writeability
+			rc = mget_ready_2_write(sockfd, timeout);
+		} else {
+			// wait for readability
+			rc = mget_ready_2_read(sockfd, timeout);
+		}
+	}
+
+	return ret;
+}
+
 int mget_ssl_open(mget_tcp_t *tcp)
 {
 	gnutls_session_t session;
@@ -1157,50 +1198,30 @@ int mget_ssl_open(mget_tcp_t *tcp)
 
 	gnutls_session_set_ptr(session, ctx);
 
-	// Wait for socket being ready before we call gnutls_handshake().
-	// I had problems on a KVM Win7 + CygWin (gnutls 3.2.4-1).
-	rc = mget_ready_2_write(sockfd, connect_timeout);
+	ret = _do_handshake(session, sockfd, connect_timeout);
 
-	// Perform the TLS handshake
-	while (rc > 0) {
-		rc = gnutls_handshake(session);
-		if (rc == 0 || gnutls_error_is_fatal(rc)) {
-			if (rc == 0) {
-				ret = MGET_E_SUCCESS;
-			} else {
-				error_printf("GnuTLS: (%d) %s\n", rc, gnutls_strerror(rc));
-
-				if (rc == GNUTLS_E_CERTIFICATE_ERROR)
-					ret = MGET_E_CERTIFICATE;
-				else
-					ret = MGET_E_HANDSHAKE;
-			}
-			break;
-		}
-
-		if (gnutls_record_get_direction(session)) {
-			// wait for writeability
-			rc = mget_ready_2_write(sockfd, connect_timeout);
-		} else {
-			// wait for readability
-			rc = mget_ready_2_read(sockfd, connect_timeout);
+#if GNUTLS_VERSION_NUMBER >= 0x030200
+	if (_config.alpn) {
+		gnutls_datum_t protocol;
+		if ((rc = gnutls_alpn_get_selected_protocol(session, &protocol)))
+			error_printf("GnuTLS: Get ALPN: %s\n", gnutls_strerror(rc));
+		else {
+			debug_printf("ALPN: Server accepted protocol '%.*s'\n", protocol.size, protocol.data);
+			if (!memcmp(protocol.data, "h2", 2))
+				tcp->protocol = MGET_PROTOCOL_HTTP_2_0;
 		}
 	}
+#endif
 
 	if (_config.print_info)
 		_print_info(session);
-
-	if (ret == MGET_E_UNKNOWN) {
-		if (rc == 0) {
-			debug_printf("Handshake timed out\n");
-			ret = MGET_E_TIMEOUT;
-		}
-	}
 
 	if (ret == MGET_E_SUCCESS) {
 		debug_printf("Handshake completed\n");
 		tcp->ssl_session = session;
 	} else {
+		if (ret == MGET_E_TIMEOUT)
+			debug_printf("Handshake timed out\n");
 		xfree(ctx->hostname);
 		xfree(ctx);
 		gnutls_deinit(session);
@@ -1278,12 +1299,22 @@ void mget_ssl_server_deinit(void)
 	mget_thread_mutex_unlock(&_mutex);
 }
 
-void *mget_ssl_server_open(int sockfd, int connect_timeout)
+// void *mget_ssl_server_open(int sockfd, int connect_timeout)
+int mget_ssl_server_open(mget_tcp_t *tcp)
 {
 	gnutls_session_t session;
+	int ret = MGET_E_UNKNOWN;
+	int sockfd, connect_timeout;
+
+	if (!tcp)
+		return MGET_E_INVALID;
 
 	if (!_init)
 		mget_ssl_server_init();
+
+//	hostname = tcp->ssl_hostname;
+	sockfd= tcp->sockfd;
+	connect_timeout = tcp->connect_timeout;
 
 #ifdef GNUTLS_NONBLOCK
 	gnutls_init(&session, GNUTLS_SERVER | GNUTLS_NONBLOCK);
@@ -1303,43 +1334,21 @@ void *mget_ssl_server_open(int sockfd, int connect_timeout)
 	// gnutls_transport_set_int(session, sockfd);
 	gnutls_transport_set_ptr(session, (gnutls_transport_ptr_t)(ptrdiff_t)sockfd);
 
-	// Wait for socket being ready before we call gnutls_handshake().
-	// I had problems on a KVM Win7 + CygWin (gnutls 3.2.4-1).
-	int ret = mget_ready_2_write(sockfd, connect_timeout);
+	ret = _do_handshake(session, sockfd, connect_timeout);
 
-	// Perform the TLS handshake
-	while (ret > 0) {
-		ret = gnutls_handshake(session);
-		if (ret == 0 || gnutls_error_is_fatal(ret)) {
-			if (ret == 0)
-				ret = 1;
-			break;
-		}
+	if (_config.print_info)
+		_print_info(session);
 
-		if (gnutls_record_get_direction(session)) {
-			// wait for writeability
-			ret = mget_ready_2_write(sockfd, connect_timeout);
-		} else {
-			// wait for readability
-			ret = mget_ready_2_read(sockfd, connect_timeout);
-		}
-	}
-
-	if (ret <= 0) {
-		if (ret)
-			debug_printf("Server handshake failed (%d)\n", ret);
-		else
+	if (ret == MGET_E_SUCCESS) {
+		debug_printf("Server handshake completed\n");
+		tcp->ssl_session = session;
+	} else {
+		if (ret == MGET_E_TIMEOUT)
 			debug_printf("Server handshake timed out\n");
-
-		error_printf("GnuTLS Server: %s\n", gnutls_strerror(ret));
-
 		gnutls_deinit(session);
-		return NULL;
 	}
 
-	debug_printf("Server handshake completed\n");
-
-	return session;
+	return ret;
 }
 
 void mget_ssl_server_close(void **session)
@@ -1355,8 +1364,31 @@ void mget_ssl_server_close(void **session)
 
 ssize_t mget_ssl_read_timeout(void *session, char *buf, size_t count, int timeout)
 {
+#if GNUTLS_VERSION_NUMBER >= 0x030107
 	ssize_t nbytes;
+
+	gnutls_record_set_timeout(session, timeout);
+
+	for (;;) {
+		if ((nbytes = gnutls_record_recv(session, buf, count)) >= 0)
+			return nbytes;
+
+		if (nbytes == GNUTLS_E_AGAIN)
+			return 0; // indicate timeout
+
+		if (nbytes == GNUTLS_E_REHANDSHAKE) {
+			debug_printf("*** REHANDSHAKE while reading\n");
+			if ((nbytes = _do_handshake(session, (int)(ptrdiff_t)gnutls_transport_get_ptr(session), timeout)) == 0)
+				continue; // restart reading
+		}
+
+		return -1;
+	}
+
+	return -1;
+#else
 	int rc;
+	ssize_t nbytes;
 
 	for (;;) {
 		if (gnutls_record_check_pending(session) <= 0 &&
@@ -1364,22 +1396,35 @@ ssize_t mget_ssl_read_timeout(void *session, char *buf, size_t count, int timeou
 			return rc;
 
 		nbytes=gnutls_record_recv(session, buf, count);
-
+		if (nbytes == GNUTLS_E_REHANDSHAKE) {
+			debug_printf("*** REHANDSHAKE while reading\n");
+			if ((nbytes = _do_handshake(session, (int)(ptrdiff_t)gnutls_transport_get_ptr(session), timeout)) == 0)
+				nbytes = GNUTLS_E_AGAIN; // restart reading
+		}
 		if (nbytes >= 0 || nbytes != GNUTLS_E_AGAIN)
 			break;
 	}
 
 	return nbytes < -1 ? -1 : nbytes;
+#endif
 }
 
 ssize_t mget_ssl_write_timeout(void *session, const char *buf, size_t count, int timeout)
 {
+	ssize_t nbytes;
 	int rc;
 
 	if ((rc = mget_ready_2_write((int)(ptrdiff_t)gnutls_transport_get_ptr(session), timeout)) <= 0)
 		return rc;
 
-	return gnutls_record_send(session, buf, count);
+	if ((nbytes = gnutls_record_send(session, buf, count)) < 0) {
+		if (nbytes == GNUTLS_E_AGAIN)
+			return 0; // indicate timeout
+
+		return -1;
+	}
+
+	return nbytes;
 }
 
 #else // WITH_GNUTLS
@@ -1399,7 +1444,7 @@ ssize_t mget_ssl_read_timeout(void *session, char *buf, size_t count, int timeou
 ssize_t mget_ssl_write_timeout(void *session, const char *buf, size_t count, int timeout) { return 0; }
 void mget_ssl_server_init(void) { }
 void mget_ssl_server_deinit(void) { }
-void *mget_ssl_server_open(int sockfd, int connect_timeout) { return NULL; }
+int mget_ssl_server_open(mget_tcp_t *tcp) { return MGET_E_UNKNOWN; }
 void mget_ssl_server_close(void **session) { }
 
 #endif // WITH_GNUTLS

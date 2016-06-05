@@ -42,6 +42,9 @@
 #if WITH_ZLIB
 //#include <zlib.h>
 #endif
+#ifdef WITH_LIBNGHTTP2
+	#include <nghttp2/nghttp2.h>
+#endif
 
 #ifdef __WIN32
 # include <winsock2.h>
@@ -500,15 +503,26 @@ const char *mget_http_parse_content_disposition(const char *s, const char **file
 		while (*s) {
 			s = mget_http_parse_param(s, &param.name, &param.value);
 			if (param.value && !mget_strcasecmp_ascii("filename", param.name)) {
-				xfree(param.name);
+				// just take the last path part as filename
+				if (!*filename) {
+					if ((p = strpbrk(param.value,"/\\"))) {
+						p = strdup(p + 1);
+					} else {
+						p = (char *) param.value;
+						param.value = NULL;
+					}
 
-				//
-				if ((p = strpbrk(param.value,"/\\"))) {
-					*filename = strdup(p + 1);
-					xfree(param.value);
-				} else
-					*filename = param.value;
-				break;
+					mget_percent_unescape(p);
+					if (!mget_str_is_valid_utf8(p)) {
+						// if it is not UTF-8, assume ISO-8859-1
+						// see http://stackoverflow.com/questions/93551/how-to-encode-the-filename-parameter-of-content-disposition-header-in-http
+						*filename = mget_str_to_utf8(p, "iso-8859-1");
+						xfree(p);
+					} else {
+						*filename = p;
+						p = NULL;
+					}
+				}
 			} else if (param.value && !mget_strcasecmp_ascii("filename*", param.name)) {
 				// RFC5987
 				// ext-value     = charset  "'" [ language ] "'" value-chars
@@ -550,9 +564,17 @@ const char *mget_http_parse_content_disposition(const char *s, const char **file
 								*filename = mget_str_to_utf8(p, charset);
 							else
 								*filename = strdup(p);
+
+							// just take the last path part as filename
+							if ((p = strpbrk(*filename, "/\\"))) {
+								p = strdup(p + 1);
+								xfree(*filename);
+								*filename = p;
+							}
+
 							xfree(param.name);
 							xfree(param.value);
-							break;
+							break; // stop looping, we found the final filename
 						}
 					}
 				}
@@ -1059,7 +1081,7 @@ mget_http_response_t *mget_http_parse_response_header(char *buf)
 	const char *s;
 	char *line, *eol;
 	const char *name;
-	size_t namesize;
+	size_t namelen;
 	mget_http_response_t *resp = NULL;
 
 	resp = xcalloc(1, sizeof(mget_http_response_t));
@@ -1092,32 +1114,32 @@ mget_http_response_t *mget_http_parse_response_header(char *buf)
 
 		// debug_printf("# %p %s\n",eol,line);
 
-		s = mget_parse_name_fixed(line, &name, &namesize);
+		s = mget_parse_name_fixed(line, &name, &namelen);
 		// s now points directly after :
 
 		switch (*name | 0x20) {
 		case 'c':
-			if (!strncasecmp(name, "Content-Encoding", namesize)) {
+			if (!strncasecmp(name, "Content-Encoding", namelen)) {
 				mget_http_parse_content_encoding(s, &resp->content_encoding);
-			} else if (!strncasecmp(name, "Content-Type", namesize)) {
+			} else if (!strncasecmp(name, "Content-Type", namelen)) {
 				mget_http_parse_content_type(s, &resp->content_type, &resp->content_type_encoding);
-			} else if (!strncasecmp(name, "Content-Length", namesize)) {
+			} else if (!strncasecmp(name, "Content-Length", namelen)) {
 				resp->content_length = (size_t)atoll(s);
 				resp->content_length_valid = 1;
-			} else if (!strncasecmp(name, "Content-Disposition", namesize)) {
+			} else if (!strncasecmp(name, "Content-Disposition", namelen)) {
 				mget_http_parse_content_disposition(s, &resp->content_filename);
-			} else if (!strncasecmp(name, "Connection", namesize)) {
+			} else if (!strncasecmp(name, "Connection", namelen)) {
 				mget_http_parse_connection(s, &resp->keep_alive);
 			}
 			break;
 		case 'l':
-			if (!strncasecmp(name, "Last-Modified", namesize)) {
+			if (!strncasecmp(name, "Last-Modified", namelen)) {
 				// Last-Modified: Thu, 07 Feb 2008 15:03:24 GMT
 				resp->last_modified = mget_http_parse_full_date(s);
-			} else if (resp->code / 100 == 3 && !strncasecmp(name, "Location", namesize)) {
+			} else if (resp->code / 100 == 3 && !strncasecmp(name, "Location", namelen)) {
 				xfree(resp->location);
 				mget_http_parse_location(s, &resp->location);
-			} else if (resp->code / 100 == 3 && !strncasecmp(name, "Link", namesize)) {
+			} else if (resp->code / 100 == 3 && !strncasecmp(name, "Link", namelen)) {
 				// debug_printf("s=%.31s\n",s);
 				mget_http_link_t link;
 				mget_http_parse_link(s, &link);
@@ -1130,12 +1152,12 @@ mget_http_response_t *mget_http_parse_response_header(char *buf)
 			}
 			break;
 		case 't':
-			if (!strncasecmp(name, "Transfer-Encoding", namesize)) {
+			if (!strncasecmp(name, "Transfer-Encoding", namelen)) {
 				mget_http_parse_transfer_encoding(s, &resp->transfer_encoding);
 			}
 			break;
 		case 's':
-			if (!strncasecmp(name, "Set-Cookie", namesize)) {
+			if (!strncasecmp(name, "Set-Cookie", namelen)) {
 				// this is a parser. content validation must be done by higher level functions.
 				mget_cookie_t cookie;
 				mget_http_parse_setcookie(s, &cookie);
@@ -1148,13 +1170,13 @@ mget_http_response_t *mget_http_parse_response_header(char *buf)
 					mget_vector_add(resp->cookies, &cookie, sizeof(cookie));
 				}
 			}
-			else if (!strncasecmp(name, "Strict-Transport-Security", namesize)) {
+			else if (!strncasecmp(name, "Strict-Transport-Security", namelen)) {
 				resp->hsts = 1;
 				mget_http_parse_strict_transport_security(s, &resp->hsts_maxage, &resp->hsts_include_subdomains);
 			}
 			break;
 		case 'w':
-			if (!strncasecmp(name, "WWW-Authenticate", namesize)) {
+			if (!strncasecmp(name, "WWW-Authenticate", namelen)) {
 				mget_http_challenge_t challenge;
 				mget_http_parse_challenge(s, &challenge);
 
@@ -1166,7 +1188,7 @@ mget_http_response_t *mget_http_parse_response_header(char *buf)
 			}
 			break;
 		case 'd':
-			if (!strncasecmp(name, "Digest", namesize)) {
+			if (!strncasecmp(name, "Digest", namelen)) {
 				// http://tools.ietf.org/html/rfc3230
 				mget_http_digest_t digest;
 				mget_http_parse_digest(s, &digest);
@@ -1179,12 +1201,12 @@ mget_http_response_t *mget_http_parse_response_header(char *buf)
 			}
 			break;
 		case 'i':
-			if (!strncasecmp(name, "ICY-Metaint", namesize)) {
+			if (!strncasecmp(name, "ICY-Metaint", namelen)) {
 				resp->icy_metaint = atoi(s);
 			}
 			break;
 		case 'e':
-			if (!strncasecmp(name, "ETag", namesize)) {
+			if (!strncasecmp(name, "ETag", namelen)) {
 				mget_http_parse_etag(s, &resp->etag);
 			}
 			break;
@@ -1275,8 +1297,7 @@ void mget_http_free_request(mget_http_request_t **req)
 	if (req && *req) {
 		mget_buffer_deinit(&(*req)->esc_resource);
 		mget_buffer_deinit(&(*req)->esc_host);
-		mget_vector_free(&(*req)->lines);
-		(*req)->lines = NULL;
+		mget_vector_free(&(*req)->headers);
 		xfree(*req);
 	}
 }
@@ -1292,33 +1313,49 @@ mget_http_request_t *mget_http_create_request(const mget_iri_t *iri, const char 
 	strlcpy(req->method, method, sizeof(req->method));
 	mget_iri_get_escaped_resource(iri, &req->esc_resource);
 	mget_iri_get_escaped_host(iri, &req->esc_host);
-	req->lines = mget_vector_create(8, 8, NULL);
+	req->headers = mget_vector_create(8, 8, NULL);
+	mget_vector_set_destructor(req->headers, (void(*)(void *))mget_http_free_param);
 
 	return req;
 }
 
-void mget_http_add_header_vprintf(mget_http_request_t *req, const char *fmt, va_list args)
+void mget_http_add_header_vprintf(mget_http_request_t *req, const char *name, const char *fmt, va_list args)
 {
-	mget_vector_add_vprintf(req->lines, fmt, args);
+	mget_http_header_param_t param;
+
+	if (vasprintf((char **) &param.value, fmt, args) != -1) {
+		param.name = strdup(name);
+		mget_vector_add(req->headers, &param, sizeof(param));
+	}
 }
 
-void mget_http_add_header_printf(mget_http_request_t *req, const char *fmt, ...)
+void mget_http_add_header_printf(mget_http_request_t *req, const char *name, const char *fmt, ...)
 {
 	va_list args;
 
 	va_start(args, fmt);
-	mget_http_add_header_vprintf(req, fmt, args);
+	mget_http_add_header_vprintf(req, name, fmt, args);
 	va_end(args);
-}
-
-void mget_http_add_header_line(mget_http_request_t *req, const char *line)
-{
-	mget_vector_add_str(req->lines, line);
 }
 
 void mget_http_add_header(mget_http_request_t *req, const char *name, const char *value)
 {
-	mget_vector_add_printf(req->lines, "%s: %s", name, value);
+	mget_http_header_param_t param = {
+		.name = strdup(name),
+		.value = strdup(value)
+	};
+
+	mget_vector_add(req->headers, &param, sizeof(param));
+}
+
+void mget_http_add_header_param(mget_http_request_t *req, mget_http_header_param_t *param)
+{
+	mget_http_header_param_t _param = {
+		.name = strdup(param->name),
+		.value = strdup(param->value)
+	};
+
+	mget_vector_add(req->headers, &_param, sizeof(_param));
 }
 
 void mget_http_add_credentials(mget_http_request_t *req, mget_http_challenge_t *challenge, const char *username, const char *password)
@@ -1334,7 +1371,7 @@ void mget_http_add_credentials(mget_http_request_t *req, mget_http_challenge_t *
 
 	if (!mget_strcasecmp_ascii(challenge->auth_scheme, "basic")) {
 		const char *encoded = mget_base64_encode_printf_alloc("%s:%s", username, password);
-		mget_http_add_header_printf(req, "Authorization: Basic %s", encoded);
+		mget_http_add_header_printf(req, "Authorization", "Basic %s", encoded);
 		xfree(encoded);
 	}
 	else if (!mget_strcasecmp_ascii(challenge->auth_scheme, "digest")) {
@@ -1393,8 +1430,7 @@ void mget_http_add_credentials(mget_http_request_t *req, mget_http_challenge_t *
 		mget_buffer_init(&buf, NULL, 256);
 
 		mget_buffer_printf2(&buf,
-			"Authorization: Digest "\
-			"username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"/%s\", response=\"%s\"",
+			"Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"/%s\", response=\"%s\"",
 			username, realm, nonce, req->esc_resource.data, response_digest);
 
 		if (!mget_strcmp(qop,"auth"))
@@ -1406,7 +1442,7 @@ void mget_http_add_credentials(mget_http_request_t *req, mget_http_challenge_t *
 		if (algorithm)
 			mget_buffer_printf_append2(&buf, ", algorithm=%s", algorithm);
 
-		mget_http_add_header_line(req, buf.data);
+		mget_http_add_header(req, "Authorization", buf.data);
 
 		mget_buffer_deinit(&buf);
 	}
@@ -1433,6 +1469,285 @@ void http_set_config_int(int key, int value)
 }
 */
 
+#ifdef WITH_LIBNGHTTP2
+static ssize_t _send_callback(nghttp2_session *session G_GNUC_MGET_UNUSED,
+	const uint8_t *data, size_t length, int flags G_GNUC_MGET_UNUSED, void *user_data)
+{
+	mget_http_connection_t *conn = (mget_http_connection_t *)user_data;
+	int rc;
+
+	// debug_printf("writing... %zd\n", length);
+	if ((rc = mget_tcp_write(conn->tcp, (const char *)data, length)) <= 0) {
+		// An error will be written by the mget_tcp_write function.
+		// debug_printf("write rc %d, errno=%d\n", rc, errno);
+		return rc ? NGHTTP2_ERR_CALLBACK_FAILURE : NGHTTP2_ERR_WOULDBLOCK;
+	}
+	// debug_printf("write rc %d\n",rc);
+
+	return rc;
+}
+
+static ssize_t _recv_callback(nghttp2_session *session G_GNUC_MGET_UNUSED,
+	uint8_t *buf, size_t length, int flags G_GNUC_MGET_UNUSED, void *user_data)
+{
+	mget_http_connection_t *conn = (mget_http_connection_t *)user_data;
+	int rc;
+
+	// debug_printf("reading... %zd\n", length);
+	if ((rc = mget_tcp_read(conn->tcp, (char *)buf, length)) <= 0) {
+		//  0 = timeout resp. blocking
+		// -1 = failure
+		// debug_printf("read rc %d, errno=%d\n", rc, errno);
+		return rc ? NGHTTP2_ERR_CALLBACK_FAILURE : NGHTTP2_ERR_WOULDBLOCK;
+	}
+	// debug_printf("read rc %d\n",rc);
+
+	return rc;
+}
+
+static void _print_frame_type(int type, const char tag)
+{
+	static const char *name[] = {
+		[NGHTTP2_DATA] = "DATA",
+		[NGHTTP2_HEADERS] = "HEADERS",
+		[NGHTTP2_PRIORITY] = "PRIORITY",
+		[NGHTTP2_RST_STREAM] = "RST_STREAM",
+		[NGHTTP2_SETTINGS] = "SETTINGS",
+		[NGHTTP2_PUSH_PROMISE] = "PUSH_PROMISE",
+		[NGHTTP2_PING] = "PING",
+		[NGHTTP2_GOAWAY] = "GOAWAY",
+		[NGHTTP2_WINDOW_UPDATE] = "WINDOW_UPDATE",
+		[NGHTTP2_CONTINUATION] = "CONTINUATION"
+	};
+
+	if ((unsigned) type < countof(name))
+		debug_printf("[FRAME] %c %s\n", tag, name[type]);
+	else
+		debug_printf("[FRAME] %c Unknown type %d\n", tag, type);
+}
+
+static int _on_frame_send_callback(nghttp2_session *session G_GNUC_MGET_UNUSED,
+	const nghttp2_frame *frame, void *user_data G_GNUC_MGET_UNUSED)
+{
+	_print_frame_type(frame->hd.type, '>');
+
+	if (frame->hd.type == NGHTTP2_HEADERS) {
+		const nghttp2_nv *nva = frame->headers.nva;
+
+		for (unsigned i = 0; i < frame->headers.nvlen; i++)
+			debug_printf("[FRAME] > %.*s: %.*s\n", (int)nva[i].namelen, nva[i].name, (int)nva[i].valuelen, nva[i].value);
+	}
+
+	return 0;
+}
+
+static int _on_frame_recv_callback(nghttp2_session *session G_GNUC_MGET_UNUSED,
+	const nghttp2_frame *frame, void *user_data G_GNUC_MGET_UNUSED)
+{
+	_print_frame_type(frame->hd.type, '<');
+
+	return 0;
+}
+
+
+// the following is just needed for the progress bar
+struct _body_callback_context {
+	mget_http_response_t *resp;
+	void *context;
+	int (*body_callback)(void *, const char *, size_t);
+	char done;
+};
+
+static int _on_header_callback(nghttp2_session *session G_GNUC_MGET_UNUSED,
+	const nghttp2_frame *frame, const uint8_t *name, size_t namelen,
+	const uint8_t *value, size_t valuelen,
+	uint8_t flags G_GNUC_MGET_UNUSED, void *user_data G_GNUC_MGET_UNUSED)
+{
+	mget_http_request_t *req = nghttp2_session_get_stream_user_data(session, frame->hd.stream_id);
+
+	if (req) {
+		if (frame->hd.type == NGHTTP2_HEADERS) {
+			if (frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
+				struct _body_callback_context *ctx = req->nghttp2_context;
+				mget_http_response_t *resp = ctx->resp;
+				const char *s = mget_strmemdup((char *)value, valuelen);
+
+				debug_printf("%.*s: %s\n", (int)namelen, name, s);
+
+				switch (namelen) {
+				case 4:
+					if (!memcmp(name, "etag", namelen)) {
+						mget_http_parse_etag(s, &resp->etag);
+					}
+					else if (!memcmp(name, "link", namelen) && resp->code / 100 == 3) {
+						// debug_printf("s=%.31s\n",s);
+						mget_http_link_t link;
+						mget_http_parse_link(s, &link);
+						// debug_printf("link->uri=%s\n",link.uri);
+						if (!resp->links) {
+							resp->links = mget_vector_create(8, 8, NULL);
+							mget_vector_set_destructor(resp->links, (void(*)(void *))mget_http_free_link);
+						}
+						mget_vector_add(resp->links, &link, sizeof(link));
+					}
+					break;
+				case 6:
+					if (!memcmp(name, "digest", namelen)) {
+						// http://tools.ietf.org/html/rfc3230
+						mget_http_digest_t digest;
+						mget_http_parse_digest(s, &digest);
+						// debug_printf("%s: %s\n",digest.algorithm,digest.encoded_digest);
+						if (!resp->digests) {
+							resp->digests = mget_vector_create(4, 4, NULL);
+							mget_vector_set_destructor(resp->digests, (void(*)(void *))mget_http_free_digest);
+						}
+						mget_vector_add(resp->digests, &digest, sizeof(digest));
+					}
+					break;
+				case 7:
+					if (!memcmp(name, ":status", namelen) && valuelen == 3) {
+						ctx->resp->code = ((value[0] - '0') * 10 + (value[1] - '0')) * 10 + (value[2] - '0');
+					}
+					break;
+				case 8:
+					if (resp->code / 100 == 3 && !memcmp(name, "location", namelen)) {
+						xfree(resp->location);
+						mget_http_parse_location(s, &resp->location);
+					}
+					break;
+				case 10:
+					if (!memcmp(name, "set-cookie", namelen)) {
+						// this is a parser. content validation must be done by higher level functions.
+						mget_cookie_t cookie;
+						mget_http_parse_setcookie(s, &cookie);
+
+						if (cookie.name) {
+							if (!resp->cookies) {
+								resp->cookies = mget_vector_create(4, 4, NULL);
+								mget_vector_set_destructor(resp->cookies, (void(*)(void *))mget_cookie_deinit);
+							}
+							mget_vector_add(resp->cookies, &cookie, sizeof(cookie));
+						}
+					}
+					else if (!memcmp(name, "connection", namelen)) {
+						mget_http_parse_connection(s, &resp->keep_alive);
+					}
+					break;
+				case 11:
+					if (!memcmp(name, "icy-metaint", namelen)) {
+						resp->icy_metaint = atoi(s);
+					}
+					break;
+				case 12:
+					if (!memcmp(name, "content-type", namelen)) {
+						mget_http_parse_content_type(s, &resp->content_type, &resp->content_type_encoding);
+					}
+					break;
+				case 13:
+					if (!memcmp(name, "last-modified", namelen)) {
+						// Last-Modified: Thu, 07 Feb 2008 15:03:24 GMT
+						resp->last_modified = mget_http_parse_full_date(s);
+					}
+					break;
+				case 14:
+					if (!memcmp(name, "content-length", namelen)) {
+						resp->content_length = (size_t)atoll(s);
+						resp->content_length_valid = 1;
+					}
+					break;
+				case 16:
+					if (!memcmp(name, "content-encoding", namelen)) {
+						mget_http_parse_content_encoding(s, &resp->content_encoding);
+					}
+					else if (!memcmp(name, "www-authenticate", namelen)) {
+						mget_http_challenge_t challenge;
+						mget_http_parse_challenge(s, &challenge);
+
+						if (!resp->challenges) {
+							resp->challenges = mget_vector_create(2, 2, NULL);
+							mget_vector_set_destructor(resp->challenges, (void(*)(void *))mget_http_free_challenge);
+						}
+						mget_vector_add(resp->challenges, &challenge, sizeof(challenge));
+					}
+					break;
+				case 17:
+					if (!memcmp(name, "transfer-encoding", namelen)) {
+						mget_http_parse_transfer_encoding(s, &resp->transfer_encoding);
+					}
+					break;
+				case 19:
+					if (!memcmp(name, "content-disposition", namelen)) {
+						mget_http_parse_content_disposition(s, &resp->content_filename);
+					}
+					break;
+				case 25:
+					if (!memcmp(name, "strict-transport-security", namelen)) {
+						resp->hsts = 1;
+						mget_http_parse_strict_transport_security(s, &resp->hsts_maxage, &resp->hsts_include_subdomains);
+					}
+					break;
+				}
+
+				xfree(s);
+			}
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * This function is called to indicate that a stream is closed.
+ */
+static int _on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
+	uint32_t error_code G_GNUC_MGET_UNUSED, void *user_data G_GNUC_MGET_UNUSED)
+{
+	mget_http_request_t *req = nghttp2_session_get_stream_user_data(session, stream_id);
+
+	debug_printf("closing stream %d\n", stream_id);
+	if (req) {
+		struct _body_callback_context *ctx = req->nghttp2_context;
+
+		if (ctx)
+			ctx->done = 1;
+	}
+
+	return 0;
+}
+/*
+ * The implementation of nghttp2_on_data_chunk_recv_callback type. We
+ * use this function to print the received response body.
+ */
+static int _on_data_chunk_recv_callback(nghttp2_session *session,
+	uint8_t flags G_GNUC_MGET_UNUSED, int32_t stream_id,
+	const uint8_t *data, size_t len,	void *user_data G_GNUC_MGET_UNUSED)
+{
+	mget_http_request_t *req = nghttp2_session_get_stream_user_data(session, stream_id);
+
+	if (req) {
+		struct _body_callback_context *ctx = req->nghttp2_context;
+//		debug_printf("[INFO] C <---------------------------- S%d (DATA chunk - %zu bytes)\n", stream_id, len);
+		debug_printf("nbytes %zd\n", len);
+		if (ctx && ctx->body_callback)
+			ctx->body_callback(ctx->context, (char *)data, (ssize_t)len);
+		// debug_write((char *)data, len);
+		// debug_printf("\n");
+	}
+	return 0;
+}
+
+static void setup_nghttp2_callbacks(nghttp2_session_callbacks *callbacks)
+{
+	nghttp2_session_callbacks_set_send_callback(callbacks, _send_callback);
+	nghttp2_session_callbacks_set_recv_callback(callbacks, _recv_callback);
+	nghttp2_session_callbacks_set_on_frame_send_callback(callbacks, _on_frame_send_callback);
+	nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks, _on_frame_recv_callback);
+	nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, _on_stream_close_callback);
+	nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, _on_data_chunk_recv_callback);
+	nghttp2_session_callbacks_set_on_header_callback(callbacks, _on_header_callback);
+}
+#endif
+
 int mget_http_open(mget_http_connection_t **_conn, const mget_iri_t *iri)
 {
 	static int next_http_proxy = -1;
@@ -1450,7 +1765,6 @@ int mget_http_open(mget_http_connection_t **_conn, const mget_iri_t *iri)
 	int
 		rc,
 		ssl = iri->scheme == MGET_IRI_SCHEME_HTTPS;
-
 
 	if (!_conn)
 		return MGET_E_INVALID;
@@ -1487,6 +1801,33 @@ int mget_http_open(mget_http_connection_t **_conn, const mget_iri_t *iri)
 		conn->port = iri->resolv_port;
 		conn->scheme = iri->scheme;
 		conn->buf = mget_buffer_alloc(102400); // reusable buffer, large enough for most requests and responses
+#ifdef WITH_LIBNGHTTP2
+		if ((conn->protocol = mget_tcp_get_protocol(conn->tcp)) == MGET_PROTOCOL_HTTP_2_0) {
+			nghttp2_session_callbacks *callbacks;
+
+			if (nghttp2_session_callbacks_new(&callbacks)) {
+				error_printf(_("Failed to create HTTP2 callbacks\n"));
+				mget_http_close(_conn);
+				return MGET_E_INVALID;
+			}
+
+			setup_nghttp2_callbacks(callbacks);
+			rc = nghttp2_session_client_new(&conn->http2_session, callbacks, conn);
+			nghttp2_session_callbacks_del(callbacks);
+
+			if (rc) {
+				error_printf(_("Failed to create HTTP2 client session (%d)\n"), rc);
+				mget_http_close(_conn);
+				return MGET_E_INVALID;
+			}
+
+			if ((rc = nghttp2_submit_settings(conn->http2_session, NGHTTP2_FLAG_NONE, NULL, 0))) {
+				error_printf(_("Failed to submit HTTP2 client settings (%d)\n"), rc);
+				mget_http_close(_conn);
+				return MGET_E_INVALID;
+			}
+		}
+#endif
 	} else {
 		mget_http_close(_conn);
 	}
@@ -1496,7 +1837,16 @@ int mget_http_open(mget_http_connection_t **_conn, const mget_iri_t *iri)
 
 void mget_http_close(mget_http_connection_t **conn)
 {
-	if (conn && *conn) {
+	if (*conn) {
+		debug_printf("closing connection\n");
+#ifdef WITH_LIBNGHTTP2
+		if ((*conn)->http2_session) {
+			int rc = nghttp2_session_terminate_session((*conn)->http2_session, NGHTTP2_NO_ERROR);
+			if (rc)
+				error_printf(_("Failed to terminate HTTP2 session (%d)\n"), rc);
+			nghttp2_session_del((*conn)->http2_session);
+		}
+#endif
 		mget_tcp_deinit(&(*conn)->tcp);
 //		if (!mget_tcp_get_dns_caching())
 //			freeaddrinfo((*conn)->addrinfo);
@@ -1508,9 +1858,66 @@ void mget_http_close(mget_http_connection_t **conn)
 	}
 }
 
+#define INIT_NV(nv, NAME, VALUE) \
+{ \
+	(nv)->name = (uint8_t *) NAME; \
+	(nv)->value = (uint8_t *) VALUE; \
+	(nv)->namelen = sizeof(NAME) - 1; \
+	(nv)->valuelen = sizeof(VALUE) - 1; \
+	(nv)->flags = NGHTTP2_NV_FLAG_NONE; \
+}
+
+#define INIT_NV_CS(nv, NAME, VALUE) \
+{ \
+	(nv)->name = (uint8_t *) NAME; \
+	(nv)->value = (uint8_t *) VALUE; \
+	(nv)->namelen = strlen((char *)(nv)->name); \
+	(nv)->valuelen = strlen(VALUE); \
+	(nv)->flags = NGHTTP2_NV_FLAG_NONE; \
+}
+
 static int  G_GNUC_MGET_NONNULL((1,2)) _http_send_request(mget_http_connection_t *conn, mget_http_request_t *req, const void *body, size_t length)
 {
 	ssize_t nbytes;
+
+#ifdef WITH_LIBNGHTTP2
+	if (mget_tcp_get_protocol(conn->tcp) == MGET_PROTOCOL_HTTP_2_0) {
+		int n = 4 + mget_vector_size(req->headers);
+		nghttp2_nv nvs[n], *nvp;
+		char resource[req->esc_resource.length + 2];
+
+		resource[0] = '/';
+		memcpy(resource + 1, req->esc_resource.data, req->esc_resource.length + 1);
+		INIT_NV(&nvs[0], ":method", "GET")
+		INIT_NV_CS(&nvs[1], ":path", resource)
+		INIT_NV(&nvs[2], ":scheme", "https")
+		INIT_NV_CS(&nvs[3], ":authority", req->esc_host.data)
+		nvp = &nvs[4];
+
+		for (int it = 0; it < mget_vector_size(req->headers); it++) {
+			mget_http_header_param_t *param = mget_vector_get(req->headers, it);
+			if (!mget_strcasecmp_ascii(param->name, "Connection"))
+				continue;
+			if (!mget_strcasecmp_ascii(param->name, "Accept-Encoding"))
+				continue;
+
+			INIT_NV_CS(nvp, param->name, param->value)
+			nvp++;
+		}
+
+		// nghttp2 does strdup of name+value and lowercase conversion of 'name'
+		req->stream_id = nghttp2_submit_request(conn->http2_session, NULL, nvs, nvp - nvs, NULL, req);
+
+		if (req->stream_id < 0) {
+			error_printf(_("Failed to submit HTTP2 request\n"));
+			return -1;
+		}
+
+		debug_printf("HTTP2 stream id %d\n", req->stream_id);
+
+		return 0;
+	}
+#endif
 
 	if ((nbytes = mget_http_request_to_buffer(req, conn->buf)) < 0) {
 		error_printf(_("Failed to create request buffer\n"));
@@ -1568,8 +1975,13 @@ ssize_t mget_http_request_to_buffer(mget_http_request_t *req, mget_buffer_t *buf
 	mget_buffer_bufcat(buf, &req->esc_host);
 	mget_buffer_memcat(buf, "\r\n", 2);
 
-	for (int it = 0; it < mget_vector_size(req->lines); it++) {
-		mget_buffer_strcat(buf, mget_vector_get(req->lines, it));
+	for (int it = 0; it < mget_vector_size(req->headers); it++) {
+		mget_http_header_param_t *param = mget_vector_get(req->headers, it);
+
+		mget_buffer_strcat(buf, param->name);
+		mget_buffer_memcat(buf, ": ", 2);
+		mget_buffer_strcat(buf, param->value);
+
 		if (buf->data[buf->length - 1] != '\n') {
 			mget_buffer_memcat(buf, "\r\n", 2);
 		}
@@ -1596,6 +2008,66 @@ mget_http_response_t *mget_http_get_response_cb(
 	char *buf, *p = NULL;
 	mget_http_response_t *resp = NULL;
 	mget_decompressor_t *dc = NULL;
+	int ioflags;
+
+#ifdef WITH_LIBNGHTTP2
+	if (conn->protocol == MGET_PROTOCOL_HTTP_2_0) {
+		resp = xcalloc(1, sizeof(mget_http_response_t));
+		resp->major = 2;
+		// we do not get a Keep-Alive header in HTTP2 - let's assume the connection stays open
+		resp->keep_alive = 1;
+
+		struct _body_callback_context ctx = { .resp = resp, .context = context, .body_callback = body_callback };
+		req->nghttp2_context = &ctx;
+
+		int timeout = mget_tcp_get_timeout(conn->tcp);
+
+		for (int rc = 0; rc == 0 && !ctx.done;) {
+			ioflags = 0;
+			if (nghttp2_session_want_write(conn->http2_session))
+				ioflags |= MGET_IO_WRITABLE;
+			if (nghttp2_session_want_read(conn->http2_session))
+				ioflags |= MGET_IO_READABLE;
+
+			if (ioflags)
+				ioflags = mget_tcp_ready_2_transfer(conn->tcp, ioflags);
+			// debug_printf("ioflags=%d timeout=%d\n",ioflags,mget_tcp_get_timeout(conn->tcp));
+			if (ioflags <= 0) break; // error or timeout
+
+			mget_tcp_set_timeout(conn->tcp, 0); // 0 = immediate
+			rc = 0;
+			if (ioflags & MGET_IO_WRITABLE) {
+				rc = nghttp2_session_send(conn->http2_session);
+			}
+			if (!rc && (ioflags & MGET_IO_READABLE))
+				rc = nghttp2_session_recv(conn->http2_session);
+			mget_tcp_set_timeout(conn->tcp, timeout); // restore old timeout
+
+/*
+			while (nghttp2_session_want_write(conn->http2_session)) {
+				rc = nghttp2_session_send(conn->http2_session);
+			}
+			debug_printf("1 response status %d done %d\n", resp->code, ctx.done);
+			if (nghttp2_session_want_read(conn->http2_session)) {
+				rc = nghttp2_session_recv(conn->http2_session);
+			}
+*/
+		}
+
+		debug_printf("response status %d\n", resp->code);
+
+		// a workaround for broken server configurations
+		// see http://mail-archives.apache.org/mod_mbox/httpd-dev/200207.mbox/<3D2D4E76.4010502@talex.com.pl>
+		if (resp->content_encoding == mget_content_encoding_gzip &&
+			!mget_strcasecmp_ascii(resp->content_type, "application/x-gzip"))
+		{
+			debug_printf("Broken server configuration gzip workaround triggered\n");
+			resp->content_encoding =  mget_content_encoding_identity;
+		}
+
+		return resp;
+	}
+#endif
 
 	// reuse generic connection buffer
 	buf = conn->buf->data;
@@ -1643,7 +2115,7 @@ mget_http_response_t *mget_http_get_response_cb(
 
 			if (req && !mget_strcasecmp_ascii(req->method, "HEAD"))
 				goto cleanup; // a HEAD response won't have a body
-				
+
 			p += 4; // skip \r\n\r\n to point to body
 			break;
 		}

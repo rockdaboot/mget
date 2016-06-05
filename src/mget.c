@@ -966,8 +966,12 @@ int main(int argc, const char *const *argv)
 			error_printf(_("Failed to wait for downloader #%d (%d %d)\n"), n, rc, errno);
 	}
 
+	int downloaded_files = blacklist_size() - queue_size();
 	if (config.progress)
-		bar_printf(config.num_threads, "Files: %d/%d  Bytes: %llu", blacklist_size() - queue_size(), blacklist_size(), quota);
+		bar_printf(config.num_threads, "Files: %d/%d  Bytes: %llu", downloaded_files, blacklist_size(), quota);
+	else if ((config.recursive || config.page_requisites || (config.input_file && quota != 0)) && quota) {
+		info_printf(_("Downloaded: %d files, %llu bytes\n"), downloaded_files, quota);
+	}
 
 	if (config.save_cookies)
 		mget_cookie_db_save(config.cookie_db, config.save_cookies, config.keep_session_cookies);
@@ -1097,7 +1101,7 @@ void *downloader_thread(void *p)
 
 				resp = http_get(job->iri, NULL, downloader, "HEAD");
 				if (resp)
-					print_status(downloader, "%d %s\n", resp->code, resp->reason);
+					print_status(downloader, "HTTP response %d %s\n", resp->code, resp->reason);
 				else if (downloader->final_error)
 					goto ready;
 			}
@@ -1189,7 +1193,7 @@ void *downloader_thread(void *p)
 
 			resp = http_get(job->iri, NULL, downloader, NULL);
 			if (resp)
-				print_status(downloader, "%d %s\n", resp->code, resp->reason);
+				print_status(downloader, "HTTP response %d %s\n", resp->code, resp->reason);
 			else if (downloader->final_error)
 				goto ready;
 		}
@@ -1925,7 +1929,7 @@ static void G_GNUC_MGET_NONNULL((1)) _save_file(mget_http_response_t *resp, cons
 			debug_printf("not saved '%s' (quota of %lld reached)\n", fname, config.quota);
 			return;
 		}
-	} else if (config.progress) {
+	} else {
 		// just update number bytes read (body only) for display purposes
 		quota_modify_read(config.save_headers ? resp->header->length + resp->body->length : resp->body->length);
 	}
@@ -2122,10 +2126,8 @@ int download_part(DOWNLOADER *downloader)
 			if (resp) {
 				mget_cookie_store_cookies(config.cookie_db, resp->cookies); // sanitize and store cookies
 
-				if (config.progress) {
-					// just update number bytes read (body only) for display purposes
-					quota_modify_read(config.save_headers ? resp->header->length + resp->body->length : resp->body->length);
-				}
+				// just update number bytes read (body only) for display purposes
+				quota_modify_read(config.save_headers ? resp->header->length + resp->body->length : resp->body->length);
 
 				if (resp->code != 200 && resp->code != 206) {
 					print_status(downloader, "part %d download error %d\n", part->id, resp->code);
@@ -2241,7 +2243,7 @@ mget_http_response_t *http_get(mget_iri_t *iri, PART *part, DOWNLOADER *download
 //	int max_redirect = 3;
 	mget_buffer_t buf;
 	char sbuf[256];
-	int rc;
+	int rc, tries = 0;
 
 	downloader->final_error = 0;
 
@@ -2254,7 +2256,7 @@ mget_http_response_t *http_get(mget_iri_t *iri, PART *part, DOWNLOADER *download
 	} else
 		iri_scheme = NULL;
 
-	while (iri) {
+	while (iri && ++tries <= config.tries) {
 		conn = downloader->conn;
 
 		if (conn && !mget_strcmp(conn->esc_host, iri->host) &&
@@ -2295,7 +2297,7 @@ mget_http_response_t *http_get(mget_iri_t *iri, PART *part, DOWNLOADER *download
 				const char *local_filename = downloader->job->local_filename;
 
 				if (config.continue_download)
-					mget_http_add_header_printf(req, "Range: bytes=%llu-",
+					mget_http_add_header_printf(req, "Range", "bytes=%llu-",
 						get_file_size(local_filename));
 
 				if (config.timestamping) {
@@ -2340,20 +2342,20 @@ mget_http_response_t *http_get(mget_iri_t *iri, PART *part, DOWNLOADER *download
 
 			mget_http_add_header(req, "Accept-Encoding", buf.data);
 
-			mget_http_add_header_line(req, "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n");
+			mget_http_add_header(req, "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
 
 //			if (config.spider && !config.recursive)
 //				http_add_header_if_modified_since(time(NULL));
-//				http_add_header_line(req, "If-Modified-Since: Wed, 29 Aug 2012 00:00:00 GMT\r\n");
+//				http_add_header(req, "If-Modified-Since", "Wed, 29 Aug 2012 00:00:00 GMT");
 
 			if (config.user_agent)
 				mget_http_add_header(req, "User-Agent", config.user_agent);
 
 			if (config.keep_alive)
-				mget_http_add_header_line(req, "Connection: keep-alive\r\n");
+				mget_http_add_header(req, "Connection", "keep-alive");
 
 			if (!config.cache)
-				mget_http_add_header_line(req, "Pragma: no-cache\r\n");
+				mget_http_add_header(req, "Pragma", "no-cache");
 
 			if (config.referer)
 				mget_http_add_header(req, "Referer", config.referer);
@@ -2374,7 +2376,7 @@ mget_http_response_t *http_get(mget_iri_t *iri, PART *part, DOWNLOADER *download
 			}
 
 			if (challenges) {
-				// There might be more than one challenge, we could select the securest one.
+				// There might be more than one challenge, we could select the most secure one.
 				// Prefer 'Digest' over 'Basic'
 				// the following adds an Authorization: HTTP header
 				mget_http_challenge_t *challenge, *selected_challenge = NULL;
@@ -2397,7 +2399,7 @@ mget_http_response_t *http_get(mget_iri_t *iri, PART *part, DOWNLOADER *download
 			}
 
 			if (part)
-				mget_http_add_header_printf(req, "Range: bytes=%llu-%llu",
+				mget_http_add_header_printf(req, "Range", "bytes=%llu-%llu",
 					(unsigned long long) part->position, (unsigned long long) part->position + part->length - 1);
 
 			// add cookies
@@ -2413,16 +2415,16 @@ mget_http_response_t *http_get(mget_iri_t *iri, PART *part, DOWNLOADER *download
 			if (config.post_data) {
 				size_t length = strlen(config.post_data);
 
-				mget_http_add_header_line(req, "Content-Type: application/x-www-form-urlencoded");
-				mget_http_add_header_printf(req, "Content-Length: %zu", length);
+				mget_http_add_header(req, "Content-Type", "application/x-www-form-urlencoded");
+				mget_http_add_header_printf(req, "Content-Length", "%zu", length);
 				rc = mget_http_send_request_with_body(conn, req, config.post_data, length);
 			} else if (config.post_file) {
 				size_t length;
 				char *data;
 
 				if ((data = mget_read_file(config.post_file, &length))) {
-					mget_http_add_header_line(req, "Content-Type: application/x-www-form-urlencoded");
-					mget_http_add_header_printf(req, "Content-Length: %zu", length);
+					mget_http_add_header(req, "Content-Type", "application/x-www-form-urlencoded");
+					mget_http_add_header_printf(req, "Content-Length", "%zu", length);
 					rc = mget_http_send_request_with_body(conn, req, data, length);
 					xfree(data);
 				} else

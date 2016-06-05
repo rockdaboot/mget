@@ -42,16 +42,22 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <libmget.h>
 
 #include "libtest.h"
 
 static mget_thread_t
-	server_tid,
-	server_ssl_tid;
+	http_server_tid,
+	https_server_tid,
+	ftp_server_tid,
+	ftps_server_tid;
 static int
-	server_port,
-	server_port_ssl,
+	http_server_port,
+	https_server_port,
+	ftp_server_port,
+	ftps_server_port,
+	ftps_implicit,
 	terminate,
 	keep_tmpfiles;
 /*static const char
@@ -65,15 +71,23 @@ static mget_test_url_t
 	*urls;
 static size_t
 	nurls;
+static mget_test_ftp_io_t
+	*ios;
+static size_t
+	nios;
+static int
+	ios_ordered;
 static char
 	tmpdir[128];
+static const char
+	*server_hello;
 
 static void sigterm_handler(int sig G_GNUC_MGET_UNUSED)
 {
 	terminate = 1;
 }
 
-static void *_server_thread(void *ctx)
+static void *_http_server_thread(void *ctx)
 {
 	mget_tcp_t *tcp=NULL, *parent_tcp = ctx;
 	mget_test_url_t *url = NULL;
@@ -234,6 +248,133 @@ static void *_server_thread(void *ctx)
 	return NULL;
 }
 
+static void *_ftp_server_thread(void *ctx)
+{
+	mget_tcp_t *tcp = NULL, *parent_tcp = ctx, *pasv_parent_tcp = NULL, *pasv_tcp = NULL;
+	char buf[4096];
+	ssize_t nbytes;
+	int pasv_port, found;
+	unsigned io_pos;
+
+#if defined(_WIN32) || defined(_WIN64)
+	signal(SIGTERM, sigterm_handler);
+#else
+	sigaction(SIGTERM, &(struct sigaction) { .sa_handler = sigterm_handler }, NULL);
+#endif
+
+	while (!terminate) {
+		mget_tcp_deinit(&tcp);
+		mget_tcp_deinit(&pasv_tcp);
+		mget_tcp_deinit(&pasv_parent_tcp);
+
+		if ((tcp = mget_tcp_accept(parent_tcp))) {
+			io_pos = 0;
+
+			if (server_hello)
+				mget_tcp_printf(tcp, "%s\r\n", server_hello);
+
+			// as a quick hack, just assume that each line comes in one packet
+			while ((nbytes = mget_tcp_read(tcp, buf, sizeof(buf)-1)) > 0) {
+				buf[nbytes] = 0;
+
+				while (--nbytes >= 0 && (buf[nbytes] == '\r' || buf[nbytes] == '\n'))
+					buf[nbytes] = 0;
+
+				mget_debug_printf("### Got: '%s'\n", buf);
+
+				found = 0;
+				if (ios_ordered) {
+					if (!strcmp(buf, ios[io_pos].in))
+						found = 1;
+				} else {
+					for (io_pos = 0; io_pos < nios; io_pos++) {
+						if (!strcmp(buf, ios[io_pos].in)) {
+							found = 1;
+							break;
+						}
+					}
+				}
+				if (!found) {
+					mget_error_printf(_("Unexpected input: '%s'\n"), buf);
+					mget_tcp_printf(tcp, "500 Unknown command\r\n");
+					continue;
+				}
+
+				if (!strncmp(buf, "AUTH", 4)) {
+					// assume TLS auth type
+					mget_tcp_printf(tcp, "%s\r\n", ios[io_pos].out);
+					if (atoi(ios[io_pos].out)/100 == 2)
+						mget_tcp_tls_start(tcp);
+					io_pos++;
+					continue;
+				}
+
+				if (!strncmp(buf, "PASV", 4) || !strncmp(buf, "EPSV", 4)) {
+					// init FTP PASV/EPSV socket
+					// we ignore EPSV address type here, we listen on IPv4 and IPv6 anyways
+					pasv_parent_tcp=mget_tcp_init();
+					mget_tcp_set_timeout(pasv_parent_tcp, -1); // INFINITE timeout
+					if (!strncmp(buf, "EPSV", 4)) {
+						switch (atoi(buf+4)) {
+							case 1: mget_tcp_set_family(pasv_parent_tcp, MGET_NET_FAMILY_IPV4); break;
+							case 2: mget_tcp_set_family(pasv_parent_tcp, MGET_NET_FAMILY_IPV6); break;
+							default: mget_tcp_set_family(pasv_parent_tcp, MGET_NET_FAMILY_ANY); break;
+						}
+					}
+					if (mget_tcp_listen(pasv_parent_tcp, "localhost", NULL, 5) != 0) {
+						mget_tcp_printf(tcp, "500 failed to open port\r\n");
+						break;
+					}
+					pasv_port = mget_tcp_get_local_port(pasv_parent_tcp);
+
+					const char *src = ios[io_pos].out;
+					char *response = mget_malloc(strlen(src) + 32 + 1);
+					char *dst = response;
+
+					while (*src) {
+						if (*src == '{') {
+							if (!strncmp(src, "{{pasvdata}}", 12)) {
+								if (!strncmp(buf, "EPSV", 4))
+									dst += sprintf(dst, "(|||%d|)", pasv_port);
+								else
+									dst += sprintf(dst, "(127,0,0,1,%d,%d)", pasv_port / 256, pasv_port % 256);
+								src += 12;
+								continue;
+							}
+						}
+						*dst++ = *src++;
+					}
+					*dst = 0;
+
+					mget_tcp_printf(tcp, "%s\r\n", response);
+					mget_xfree(response);
+
+					if (!(pasv_tcp = mget_tcp_accept(pasv_parent_tcp))) {
+						mget_error_printf(_("Failed to get PASV connection\n"));
+						break;
+					}
+				} else {
+					mget_tcp_printf(tcp, "%s\r\n", ios[io_pos].out);
+				}
+
+				if (ios[io_pos].send_url && pasv_tcp) {
+					// send data
+					mget_tcp_printf(pasv_tcp, "%s", ios[io_pos].send_url->body);
+					mget_tcp_deinit(&pasv_tcp);
+					mget_tcp_printf(tcp, "226 Transfer complete\r\n");
+				}
+
+				io_pos++;
+			}
+		} else if (!terminate)
+			mget_error_printf(_("Failed to get connection (%d)\n"), errno);
+	}
+
+	mget_tcp_deinit(&parent_tcp);
+
+	return NULL;
+}
+
 // To reduce the verbosity of 'valgrind --trace-children=yes' output,
 //   we avoid system("rm -rf ...") calls.
 static void _remove_directory(const char *dirname);
@@ -271,7 +412,7 @@ static void _remove_directory(const char *dirname)
 		mget_error_printf(_("Failed to rmdir %s\n"), dirname);
 }
 
-void mget_test_stop_http_server(void)
+void mget_test_stop_server(void)
 {
 	size_t it;
 
@@ -292,18 +433,24 @@ void mget_test_stop_http_server(void)
 		_remove_directory(tmpdir);
 
 	// free resources - needed for valgrind testing
-	pthread_kill(server_tid, SIGTERM);
-	pthread_kill(server_ssl_tid, SIGTERM);
+	pthread_kill(http_server_tid, SIGTERM);
+	pthread_kill(https_server_tid, SIGTERM);
+	pthread_kill(ftp_server_tid, SIGTERM);
+	if (ftps_implicit)
+		pthread_kill(ftps_server_tid, SIGTERM);
 
-	mget_thread_join(server_tid);
-	mget_thread_join(server_ssl_tid);
+	mget_thread_join(http_server_tid);
+	mget_thread_join(https_server_tid);
+	mget_thread_join(ftp_server_tid);
+	if (ftps_implicit)
+		mget_thread_join(ftps_server_tid);
 
 	mget_global_deinit();
 }
 
-void mget_test_start_http_server(int first_key, ...)
+void mget_test_start_server(int first_key, ...)
 {
-	static mget_tcp_t *parent_tcp, *parent_tcp_ssl;
+	static mget_tcp_t *http_parent_tcp, *https_parent_tcp, *ftp_parent_tcp, *ftps_parent_tcp;
 	int rc, key;
 	size_t it;
 	va_list args;
@@ -334,13 +481,29 @@ void mget_test_start_http_server(int first_key, ...)
 			urls = va_arg(args, mget_test_url_t *);
 			nurls = va_arg(args, size_t);
 			break;
+		case MGET_TEST_FTP_SERVER_HELLO:
+			server_hello = va_arg(args, const char *);
+			break;
+		case MGET_TEST_FTP_IO_ORDERED:
+			ios_ordered = 1;
+			ios = va_arg(args, mget_test_ftp_io_t *);
+			nios = va_arg(args, size_t);
+			break;
+		case MGET_TEST_FTP_IO_UNORDERED:
+			ios_ordered = 0;
+			ios = va_arg(args, mget_test_ftp_io_t *);
+			nios = va_arg(args, size_t);
+			break;
+		case MGET_TEST_FTPS_IMPLICIT:
+			ftps_implicit = va_arg(args, int);
+			break;
 		default:
 			mget_error_printf(_("Unknown option %d\n"), key);
 		}
 	}
 	va_end(args);
 
-	atexit(mget_test_stop_http_server);
+	atexit(mget_test_stop_server);
 
 	snprintf(tmpdir, sizeof(tmpdir), ".test_%d", (int) getpid());
 
@@ -361,23 +524,40 @@ void mget_test_start_http_server(int first_key, ...)
 	mget_ssl_set_config_string(MGET_SSL_KEY_FILE, "../" SRCDIR "/certs/x509-server-key.pem");
 
 	// init HTTP server socket
-	parent_tcp=mget_tcp_init();
-	mget_tcp_set_timeout(parent_tcp, -1); // INFINITE timeout
-	if (mget_tcp_listen(parent_tcp, "localhost", NULL, 5) != 0)
+	http_parent_tcp=mget_tcp_init();
+	mget_tcp_set_timeout(http_parent_tcp, -1); // INFINITE timeout
+	if (mget_tcp_listen(http_parent_tcp, "localhost", NULL, 5) != 0)
 		exit(1);
-	server_port = mget_tcp_get_local_port(parent_tcp);
+	http_server_port = mget_tcp_get_local_port(http_parent_tcp);
 
 	// init HTTPS server socket
-	parent_tcp_ssl=mget_tcp_init();
-	mget_tcp_set_ssl(parent_tcp_ssl, 1); // switch SSL on
-	mget_tcp_set_timeout(parent_tcp_ssl, -1); // INFINITE timeout
-	if (mget_tcp_listen(parent_tcp_ssl, "localhost", NULL, 5) != 0)
+	https_parent_tcp=mget_tcp_init();
+	mget_tcp_set_ssl(https_parent_tcp, 1); // switch SSL on
+	mget_tcp_set_timeout(https_parent_tcp, -1); // INFINITE timeout
+	if (mget_tcp_listen(https_parent_tcp, "localhost", NULL, 5) != 0)
 		exit(1);
-	server_port_ssl = mget_tcp_get_local_port(parent_tcp_ssl);
+	https_server_port = mget_tcp_get_local_port(https_parent_tcp);
+
+	// init FTP server socket
+	ftp_parent_tcp=mget_tcp_init();
+	mget_tcp_set_timeout(ftp_parent_tcp, -1); // INFINITE timeout
+	if (mget_tcp_listen(ftp_parent_tcp, "localhost", NULL, 5) != 0)
+		exit(1);
+	ftp_server_port = mget_tcp_get_local_port(ftp_parent_tcp);
+
+	// init FTPS server socket
+	ftps_parent_tcp=mget_tcp_init();
+	mget_tcp_set_ssl(ftps_parent_tcp, 1); // switch SSL on
+	mget_tcp_set_timeout(ftps_parent_tcp, -1); // INFINITE timeout
+	if (mget_tcp_listen(ftps_parent_tcp, "localhost", NULL, 5) != 0)
+		exit(1);
+	ftps_server_port = mget_tcp_get_local_port(ftps_parent_tcp);
 
 	// now replace {{port}} in the body by the actual server port
 	for (it = 0; it < nurls; it++) {
-		if (urls[it].body && (strstr(urls[it].body, "{{port}}") || strstr(urls[it].body, "{{sslport}}"))) {
+		if (urls[it].body && (strstr(urls[it].body, "{{port}}") || strstr(urls[it].body, "{{sslport}}")
+				  || strstr(urls[it].body, "{{ftpport}}") || strstr(urls[it].body, "{{ftpsport}}")))
+		{
 			const char *src = urls[it].body;
 			char *dst = mget_malloc(strlen(src) + 1);
 
@@ -387,13 +567,23 @@ void mget_test_start_http_server(int first_key, ...)
 			while (*src) {
 				if (*src == '{') {
 					if (!strncmp(src, "{{port}}", 8)) {
-						dst += sprintf(dst, "%d", server_port);
+						dst += sprintf(dst, "%d", http_server_port);
 						src += 8;
 						continue;
 					}
 					else if (!strncmp(src, "{{sslport}}", 11)) {
-						dst += sprintf(dst, "%d", server_port_ssl);
+						dst += sprintf(dst, "%d", https_server_port);
 						src += 11;
+						continue;
+					}
+					else if (!strncmp(src, "{{ftpport}}", 11)) {
+						dst += sprintf(dst, "%d", ftp_server_port);
+						src += 11;
+						continue;
+					}
+					else if (!strncmp(src, "{{ftpsport}}", 12)) {
+						dst += sprintf(dst, "%d", ftps_server_port);
+						src += 12;
 						continue;
 					}
 				}
@@ -404,12 +594,22 @@ void mget_test_start_http_server(int first_key, ...)
 	}
 
 	// start thread for HTTP
-	if ((rc = mget_thread_start(&server_tid, _server_thread, parent_tcp, 0)) != 0)
-		mget_error_printf_exit(_("Failed to start server, error %d\n"), rc);
+	if ((rc = mget_thread_start(&http_server_tid, _http_server_thread, http_parent_tcp, 0)) != 0)
+		mget_error_printf_exit(_("Failed to start HTTP server, error %d\n"), rc);
 
 	// start thread for HTTPS
-	if ((rc = mget_thread_start(&server_ssl_tid, _server_thread, parent_tcp_ssl, 0)) != 0)
-		mget_error_printf_exit(_("Failed to start server, error %d\n"), rc);
+	if ((rc = mget_thread_start(&https_server_tid, _http_server_thread, https_parent_tcp, 0)) != 0)
+		mget_error_printf_exit(_("Failed to start HTTPS server, error %d\n"), rc);
+
+	// start thread for FTP
+	if ((rc = mget_thread_start(&ftp_server_tid, _ftp_server_thread, ftp_parent_tcp, 0)) != 0)
+		mget_error_printf_exit(_("Failed to start FTP server, error %d\n"), rc);
+
+	// start thread for FTPS
+	if (ftps_implicit) {
+		if ((rc = mget_thread_start(&ftps_server_tid, _ftp_server_thread, ftps_parent_tcp, 0)) != 0)
+			mget_error_printf_exit(_("Failed to start FTP server, error %d\n"), rc);
+	}
 }
 
 static void _scan_for_unexpected(const char *dirname, const mget_test_file_t *expected_files)
@@ -476,6 +676,7 @@ void mget_test(int first_key, ...)
 	va_list args;
 
 	keep_tmpfiles = 0;
+	server_hello = "220 FTP server ready";
 
 	if (!request_urls)
 		request_urls = mget_vector_create(8,8,NULL);
@@ -508,6 +709,9 @@ void mget_test(int first_key, ...)
 			break;
 		case MGET_TEST_EXECUTABLE:
 			executable = va_arg(args, const char *);
+			break;
+		case MGET_TEST_FTP_SERVER_HELLO:
+			server_hello = va_arg(args, const char *);
 			break;
 		default:
 			mget_error_printf_exit(_("Unknown option %d [%s]\n"), key, options);
@@ -554,8 +758,12 @@ void mget_test(int first_key, ...)
 
 	for (it = 0; it < (size_t)mget_vector_size(request_urls); it++) {
 		mget_buffer_printf_append2(cmd, " 'http://localhost:%d/%s'",
-			server_port, (char *)mget_vector_get(request_urls, it));
+			http_server_port, (char *)mget_vector_get(request_urls, it));
 	}
+//	for (it = 0; it < (size_t)mget_vector_size(ftp_files); it++) {
+//		mget_buffer_printf_append2(cmd, " 'ftp://localhost:%d/%s'",
+//			ftp_server_port, (char *)mget_vector_get(ftp_files, it));
+//	}
 	mget_buffer_strcat(cmd, " 2>&1");
 
 	mget_error_printf("\n  Testing '%s'\n", cmd->data);
@@ -623,7 +831,22 @@ void mget_test(int first_key, ...)
 	//	system("ls -la");
 }
 
-int mget_test_get_server_port(void)
+int mget_test_get_http_server_port(void)
 {
-	return server_port;
+	return http_server_port;
+}
+
+int mget_test_get_https_server_port(void)
+{
+	return https_server_port;
+}
+
+int mget_test_get_ftp_server_port(void)
+{
+	return ftp_server_port;
+}
+
+int mget_test_get_ftps_server_port(void)
+{
+	return ftps_server_port;
 }

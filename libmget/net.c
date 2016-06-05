@@ -180,10 +180,11 @@ struct addrinfo *mget_tcp_resolve(mget_tcp_t *tcp, const char *host, const char 
 	if (!tcp)
 		tcp = &_global_tcp;
 
-	if (!port)
-		port = "0";
+//	if (!port)
+//		port = "0";
 
-	if (tcp->caching) {
+	// if port is NULL,
+	if (tcp->caching && port) {
 		if ((addrinfo = _mget_dns_cache_get(host, port)))
 			return addrinfo;
 
@@ -198,7 +199,7 @@ struct addrinfo *mget_tcp_resolve(mget_tcp_t *tcp, const char *host, const char 
 	addrinfo = NULL;
 
 #if defined(AI_NUMERICSERV)
-	ai_flags |= (isdigit(*port) ? AI_NUMERICSERV : 0);
+	ai_flags |= (port && isdigit(*port) ? AI_NUMERICSERV : 0);
 #endif
 #if defined(AI_ADDRCONFIG)
 	ai_flags |= AI_ADDRCONFIG;
@@ -249,7 +250,7 @@ struct addrinfo *mget_tcp_resolve(mget_tcp_t *tcp, const char *host, const char 
 	if (rc) {
 		error_printf(_("Failed to resolve %s:%s (%s)\n"), host, port, gai_strerror(rc));
 
-		if (tcp->caching)
+		if (tcp->caching && port)
 			mget_thread_mutex_unlock(&mutex);
 
 		return NULL;
@@ -302,7 +303,7 @@ struct addrinfo *mget_tcp_resolve(mget_tcp_t *tcp, const char *host, const char 
 		}
 	}
 
-	if (tcp->caching) {
+	if (tcp->caching && port) {
 		// In case of a race condition the already exisiting addrinfo is returned.
 		// The addrinfo argument given to _mget_dns_cache_add() will be freed in this case.
 		addrinfo = _mget_dns_cache_add(host, port, addrinfo);
@@ -351,6 +352,16 @@ void mget_tcp_set_dns_caching(mget_tcp_t *tcp, int caching)
 int mget_tcp_get_dns_caching(mget_tcp_t *tcp)
 {
 	return (tcp ? tcp : &_global_tcp)->caching;
+}
+
+void mget_tcp_set_protocol(mget_tcp_t *tcp, int protocol)
+{
+	(tcp ? tcp : &_global_tcp)->protocol = protocol;
+}
+
+int mget_tcp_get_protocol(mget_tcp_t *tcp)
+{
+	return (tcp ? tcp : &_global_tcp)->protocol;
 }
 
 void mget_tcp_set_preferred_family(mget_tcp_t *tcp, int family)
@@ -404,6 +415,11 @@ void mget_tcp_set_connect_timeout(mget_tcp_t *tcp, int timeout)
 void mget_tcp_set_timeout(mget_tcp_t *tcp, int timeout)
 {
 	(tcp ? tcp : &_global_tcp)->timeout = timeout;
+}
+
+int mget_tcp_get_timeout(mget_tcp_t *tcp)
+{
+	return (tcp ? tcp : &_global_tcp)->timeout;
 }
 
 void mget_tcp_set_bind_address(mget_tcp_t *tcp, const char *bind_address)
@@ -528,6 +544,11 @@ static void _set_async(int fd)
 #endif
 }
 
+int mget_tcp_ready_2_transfer(mget_tcp_t *tcp, int flags)
+{
+	return mget_ready_2_transfer(tcp->sockfd, tcp->timeout, flags);
+}
+
 int mget_tcp_connect(mget_tcp_t *tcp, const char *host, const char *port)
 {
 	struct addrinfo *ai;
@@ -608,8 +629,8 @@ int mget_tcp_connect(mget_tcp_t *tcp, const char *host, const char *port)
 							mget_tcp_close(tcp);
 							break; /* stop here - the server cert couldn't be validated */
 						}
-						
-						// do not
+
+						// do not free tcp->addrinfo when calling mget_tcp_close()
 						struct addrinfo *ai_tmp = tcp->addrinfo;
 						tcp->addrinfo = NULL;
 						mget_tcp_close(tcp);
@@ -721,8 +742,7 @@ mget_tcp_t *mget_tcp_accept(mget_tcp_t *parent_tcp)
 		tcp->bind_addrinfo = NULL;
 
 		if (tcp->ssl) {
-			tcp->ssl_session = mget_ssl_server_open(tcp->sockfd, tcp->connect_timeout);
-			if (!tcp->ssl_session)
+			if (mget_tcp_tls_start(tcp))
 				mget_tcp_deinit(&tcp);
 		}
 
@@ -734,11 +754,27 @@ mget_tcp_t *mget_tcp_accept(mget_tcp_t *parent_tcp)
 	return NULL;
 }
 
+int mget_tcp_tls_start(mget_tcp_t *tcp)
+{
+	if (tcp->passive)
+		return mget_ssl_server_open(tcp);
+	else
+		return mget_ssl_open(tcp);
+}
+
+void mget_tcp_tls_stop(mget_tcp_t *tcp)
+{
+	if (tcp->passive)
+		mget_ssl_server_close(&tcp->ssl_session);
+	else
+		mget_ssl_close(&tcp->ssl_session);
+}
+
 ssize_t mget_tcp_read(mget_tcp_t *tcp, char *buf, size_t count)
 {
 	ssize_t rc;
 
-	if (tcp->ssl) {
+	if (tcp->ssl_session) {
 		rc = mget_ssl_read_timeout(tcp->ssl_session, buf, count, tcp->timeout);
 	} else {
 		// 0: no timeout / immediate
@@ -762,7 +798,7 @@ ssize_t mget_tcp_write(mget_tcp_t *tcp, const char *buf, size_t count)
 	ssize_t nwritten = 0, n;
 	int rc;
 
-	if (tcp->ssl)
+	if (tcp->ssl_session)
 		return mget_ssl_write_timeout(tcp->ssl_session, buf, count, tcp->timeout);
 
 	while (count) {
@@ -859,12 +895,7 @@ ssize_t mget_tcp_printf(mget_tcp_t *tcp, const char *fmt, ...)
 void mget_tcp_close(mget_tcp_t *tcp)
 {
 	if (tcp) {
-		if (tcp->ssl && tcp->ssl_session) {
-			if (tcp->passive)
-				mget_ssl_server_close(&tcp->ssl_session);
-			else
-				mget_ssl_close(&tcp->ssl_session);
-		}
+		mget_tcp_tls_stop(tcp);
 		if (tcp->sockfd != -1) {
 			close(tcp->sockfd);
 			tcp->sockfd = -1;
