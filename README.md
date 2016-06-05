@@ -1,6 +1,11 @@
 [![Build Status](https://travis-ci.org/rockdaboot/mget.png?branch=develop)](https://travis-ci.org/rockdaboot/mget)
 [![Coverity Scan Status](https://scan.coverity.com/projects/4414/badge.svg)](https://scan.coverity.com/projects/4414)
 
+# Development moved to [Wget2](https://github.com/rockdaboot/wget2)
+
+`This project is just kept as history, please move to the Wget2 project`
+
+
 Mget - multithreaded metalink / file / website downloader / spider and library
 ==============================================================================
 
